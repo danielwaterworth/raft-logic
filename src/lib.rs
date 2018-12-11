@@ -159,10 +159,8 @@ pub enum Operation<'a, ServerID, Entry> {
     TransitionToFollower {
         then: Box<Operation<'a, ServerID, Entry>>,
     },
-    TransitionToCandidate {
-        servers: &'a HashSet<ServerID>,
-    },
     TransitionToLeader,
+    Phantom(&'a u8),
     FreeForm(VecDeque<Action<ServerID, Entry>>),
 }
 
@@ -199,12 +197,10 @@ impl<'a, ServerID, Entry> Iterator for Operation<'a, ServerID, Entry> {
                 *self = tmp;
                 Some(Action::SetTimeout)
             },
-            Operation::TransitionToCandidate { servers } => {
-                unimplemented!()
-            },
             Operation::TransitionToLeader => {
                 unimplemented!()
             },
+            Operation::Phantom(_) => unreachable!(),
         }
     }
 }
@@ -250,10 +246,31 @@ fn transition_to_follower<'a, ServerID, Entry>(
     unimplemented!()
 }
 
-fn transition_to_candidate<'a, ServerID, Entry>(
+fn transition_to_candidate<'a, ServerID: Clone, Entry>(
+            term: Term,
             servers: &HashSet<ServerID>,
-        ) -> Operation<'a, ServerID, Entry> {
-    unimplemented!()
+            except: &ServerID,
+            version: LogVersion,
+        ) -> Operation<'a, ServerID, Entry>
+            where
+                ServerID: Hash + Eq {
+    let actions =
+        servers
+            .iter()
+            .filter(|server_id| *server_id != except)
+            .map(|server_id|
+                Action::SendMessage {
+                    server_id: server_id.clone(),
+                    term,
+                    message:
+                        Message::RequestVote {
+                            version
+                        }
+                }
+            )
+            .collect();
+
+    Operation::FreeForm(actions)
 }
 
 fn transition_to_leader<'a, ServerID, Entry>()
@@ -359,7 +376,12 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
                                 votes_received: HashSet::default(),
                             };
 
-                        transition_to_candidate(&self.servers)
+                        transition_to_candidate(
+                            self.current_term,
+                            &self.servers,
+                            &self.server_id,
+                            self.log.version(),
+                        )
                     },
                 }
             },
@@ -420,7 +442,12 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
                                 votes_received: HashSet::default(),
                             };
 
-                        transition_to_candidate(&self.servers)
+                        transition_to_candidate(
+                            self.current_term,
+                            &self.servers,
+                            &self.server_id,
+                            self.log.version(),
+                        )
                     },
                 }
             },
@@ -486,5 +513,10 @@ mod tests {
             },
         );
         assert!(iter.next().is_none());
+
+        let operations: Vec<Action<&str, &str>> =
+            a.process(&Input::Timeout).collect();
+
+        assert_eq!(operations.len(), 2);
     }
 }
