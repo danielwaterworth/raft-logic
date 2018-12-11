@@ -1,3 +1,7 @@
+mod singleton;
+
+use crate::singleton::Singleton;
+
 use std::time::Duration;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hash;
@@ -74,6 +78,7 @@ pub struct Node<ServerID: Hash + Eq, Entry> {
     log: Log<Entry>,
 }
 
+#[derive(Debug, PartialEq)]
 pub enum Message<Entry> {
     ApplyEntriesRequest {
         log_version: LogVersion,
@@ -92,7 +97,8 @@ pub enum Message<Entry> {
     },
 }
 
-pub enum RaftInput<ServerID, Entry> {
+#[derive(Debug, PartialEq)]
+pub enum Input<ServerID, Entry> {
     ClientRequest {
         entry: Entry,
     },
@@ -104,9 +110,10 @@ pub enum RaftInput<ServerID, Entry> {
     Timeout,
 }
 
-pub enum RaftOutput<ServerID, Entry> {
+#[derive(Debug, PartialEq)]
+pub enum Action<ServerID, Entry> {
     AckClientRequest,
-    NackClientRequest {
+    ClientRequestRejected {
         current_leader: Option<ServerID>,
     },
     SendMessage {
@@ -119,8 +126,9 @@ pub enum RaftOutput<ServerID, Entry> {
     Commit { entry: Entry },
 }
 
-pub enum OutputIterator<'a, ServerID, Entry> {
-    Ignore,
+pub enum Operation<'a, ServerID, Entry> {
+    DoNothing,
+    OneAction(Singleton<Action<ServerID, Entry>>),
     AcceptedVote { server_id: ServerID },
     RejectedVote { server_id: ServerID },
     AcceptedClientRequest,
@@ -128,56 +136,120 @@ pub enum OutputIterator<'a, ServerID, Entry> {
     EntriesApplied,
     EntriesNotApplied,
     TransitionToFollower {
-        then: Box<OutputIterator<'a, ServerID, Entry>>,
+        then: Box<Operation<'a, ServerID, Entry>>,
     },
     TransitionToCandidate {
         servers: &'a HashSet<ServerID>,
     },
     TransitionToLeader,
-    FreeForm(VecDeque<RaftOutput<ServerID, Entry>>),
+    FreeForm(VecDeque<Action<ServerID, Entry>>),
 }
 
-impl<'a, ServerID, Entry> Iterator for OutputIterator<'a, ServerID, Entry> {
-    type Item = RaftOutput<ServerID, Entry>;
+impl<'a, ServerID, Entry> Iterator for Operation<'a, ServerID, Entry> {
+    type Item = Action<ServerID, Entry>;
 
-    fn next(&mut self) -> Option<RaftOutput<ServerID, Entry>> {
+    fn next(&mut self) -> Option<Action<ServerID, Entry>> {
         match self {
-            OutputIterator::Ignore => None,
-            OutputIterator::AcceptedVote { server_id } => {
+            Operation::DoNothing => None,
+            Operation::OneAction(iter) => {
+                iter.next()
+            },
+            Operation::AcceptedVote { server_id } => {
                 unimplemented!()
             },
-            OutputIterator::RejectedVote { server_id } => {
+            Operation::RejectedVote { server_id } => {
                 unimplemented!()
             },
-            OutputIterator::AcceptedClientRequest => {
+            Operation::AcceptedClientRequest => {
                 unimplemented!()
             },
-            OutputIterator::RejectedClientRequest => {
+            Operation::RejectedClientRequest => {
                 unimplemented!()
             },
-            OutputIterator::EntriesApplied => {
+            Operation::EntriesApplied => {
                 unimplemented!()
             },
-            OutputIterator::EntriesNotApplied => {
+            Operation::EntriesNotApplied => {
                 unimplemented!()
             },
-            OutputIterator::FreeForm(ref mut items) => {
+            Operation::FreeForm(ref mut items) => {
                 unimplemented!()
             },
-            OutputIterator::TransitionToFollower { then } => {
-                let mut tmp = OutputIterator::Ignore;
+            Operation::TransitionToFollower { then } => {
+                let mut tmp = do_nothing();
                 mem::swap(&mut tmp, &mut **then);
                 *self = tmp;
-                Some(RaftOutput::SetTimeout)
+                Some(Action::SetTimeout)
             },
-            OutputIterator::TransitionToCandidate { servers } => {
+            Operation::TransitionToCandidate { servers } => {
                 unimplemented!()
             },
-            OutputIterator::TransitionToLeader => {
+            Operation::TransitionToLeader => {
                 unimplemented!()
             },
         }
     }
+}
+
+fn do_nothing<'a, ServerID, Entry>() -> Operation<'a, ServerID, Entry> {
+    Operation::DoNothing
+}
+
+fn accepted_vote<'a, ServerID, Entry>(server_id: ServerID)
+        -> Operation<'a, ServerID, Entry> {
+    Operation::AcceptedVote {
+        server_id
+    }
+}
+
+fn rejected_vote<'a, ServerID, Entry>(server_id: ServerID)
+        -> Operation<'a, ServerID, Entry> {
+    Operation::RejectedVote {
+        server_id
+    }
+}
+
+fn accepted_client_request<'a, ServerID, Entry>()
+        -> Operation<'a, ServerID, Entry> {
+    unimplemented!()
+}
+
+fn rejected_client_request<'a, ServerID, Entry>()
+        -> Operation<'a, ServerID, Entry> {
+    Operation::OneAction(
+        Singleton::new(
+            Action::ClientRequestRejected {
+                current_leader: None
+            }
+        )
+    )
+}
+
+fn transition_to_follower<'a, ServerID, Entry>(
+            then: Operation<'a, ServerID, Entry>
+        ) -> Operation<'a, ServerID, Entry> {
+    unimplemented!()
+}
+
+fn transition_to_candidate<'a, ServerID, Entry>(
+            servers: &HashSet<ServerID>,
+        ) -> Operation<'a, ServerID, Entry> {
+    unimplemented!()
+}
+
+fn transition_to_leader<'a, ServerID, Entry>()
+        -> Operation<'a, ServerID, Entry> {
+    unimplemented!()
+}
+
+fn entries_applied<'a, ServerID, Entry>()
+        -> Operation<'a, ServerID, Entry> {
+    unimplemented!()
+}
+
+fn entries_not_applied<'a, ServerID, Entry>()
+        -> Operation<'a, ServerID, Entry> {
+    unimplemented!()
 }
 
 impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
@@ -192,19 +264,17 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
         }
     }
 
-    pub fn process(&mut self, input: &RaftInput<ServerID, Entry>)
-            -> OutputIterator<ServerID, Entry> {
+    pub fn process(&mut self, input: &Input<ServerID, Entry>)
+            -> Operation<ServerID, Entry> {
         match input {
-            RaftInput::OnMessage { message, term, server_id } => {
+            Input::OnMessage { message, term, server_id } => {
                 if self.current_term > *term {
-                    return OutputIterator::Ignore;
+                    return do_nothing();
                 }
                 if *term > self.current_term {
                     self.current_term = *term;
                     self.state = State::Follower { voted_for: None };
-                    return OutputIterator::TransitionToFollower {
-                        then: Box::new(self.process(input)),
-                    }
+                    return transition_to_follower(self.process(input));
                 }
             },
             _ => {}
@@ -213,10 +283,10 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
         match &mut self.state {
             State::Follower { voted_for } => {
                 match input {
-                    RaftInput::ClientRequest { entry } => {
-                        OutputIterator::RejectedClientRequest
+                    Input::ClientRequest { entry } => {
+                        rejected_client_request()
                     },
-                    RaftInput::OnMessage { message, term, server_id } => {
+                    Input::OnMessage { message, term, server_id } => {
                         match message {
                             Message::RequestVote { version } => {
                                 let cmp =
@@ -227,14 +297,9 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
 
                                 if voted_for.is_none() && cmp {
                                     *voted_for = Some(server_id.clone());
-
-                                    OutputIterator::AcceptedVote {
-                                        server_id: server_id.clone()
-                                    }
+                                    accepted_vote(server_id.clone())
                                 } else {
-                                    OutputIterator::RejectedVote {
-                                        server_id: server_id.clone()
-                                    }
+                                    rejected_vote(server_id.clone())
                                 }
                             },
                             Message::ApplyEntriesRequest {
@@ -242,13 +307,13 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
                                     } => {
                                 if self.log.version() == *log_version {
                                     unimplemented!();
-                                    OutputIterator::EntriesApplied
+                                    entries_applied()
                                 } else {
-                                    OutputIterator::EntriesNotApplied
+                                    entries_not_applied()
                                 }
                             },
                             Message::VoteAccepted | Message::VoteRejected => {
-                                OutputIterator::Ignore
+                                do_nothing()
                             },
                             Message::EntriesApplied {} |
                             Message::EntriesNotApplied {} => {
@@ -259,7 +324,7 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
                             },
                         }
                     },
-                    RaftInput::Timeout => {
+                    Input::Timeout => {
                         self.current_term += 1;
 
                         self.state =
@@ -267,23 +332,19 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
                                 votes_received: HashSet::default(),
                             };
 
-                        OutputIterator::TransitionToCandidate {
-                            servers: &self.servers
-                        }
+                        transition_to_candidate(&self.servers)
                     },
                 }
             },
             State::Candidate { votes_received } => {
                 match input {
-                    RaftInput::ClientRequest { entry } => {
-                        OutputIterator::RejectedClientRequest
+                    Input::ClientRequest { entry } => {
+                        rejected_client_request()
                     },
-                    RaftInput::OnMessage { message, term, server_id } => {
+                    Input::OnMessage { message, term, server_id } => {
                         match message {
                             Message::RequestVote { version } => {
-                                OutputIterator::RejectedVote {
-                                    server_id: server_id.clone()
-                                }
+                                rejected_vote(server_id.clone())
                             },
                             Message::ApplyEntriesRequest {
                                         entries, log_version
@@ -294,9 +355,7 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
                                             Some(self.server_id.clone())
                                     };
 
-                                OutputIterator::TransitionToFollower {
-                                    then: Box::new(self.process(input)),
-                                }
+                                transition_to_follower(self.process(input))
                             },
                             Message::VoteAccepted => {
                                 votes_received.insert(server_id.clone());
@@ -308,13 +367,13 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
                                             next_index: HashMap::default(),
                                             match_index: HashMap::default(),
                                         };
-                                    OutputIterator::TransitionToLeader
+                                    transition_to_leader()
                                 } else {
-                                    OutputIterator::Ignore
+                                    do_nothing()
                                 }
                             },
                             Message::VoteRejected => {
-                                OutputIterator::Ignore
+                                do_nothing()
                             },
                             Message::EntriesApplied {} |
                             Message::EntriesNotApplied {} => {
@@ -325,7 +384,7 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
                             },
                         }
                     },
-                    RaftInput::Timeout => {
+                    Input::Timeout => {
                         self.current_term += 1;
 
                         self.state =
@@ -333,25 +392,21 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
                                 votes_received: HashSet::default(),
                             };
 
-                        OutputIterator::TransitionToCandidate {
-                            servers: &self.servers
-                        }
+                        transition_to_candidate(&self.servers)
                     },
                 }
             },
             State::Leader { next_index, match_index } => {
                 match input {
-                    RaftInput::ClientRequest { entry } => {
+                    Input::ClientRequest { entry } => {
                         let log_id =
                             self.log.insert(self.current_term, entry.clone());
-                        OutputIterator::AcceptedClientRequest
+                        accepted_client_request()
                     },
-                    RaftInput::OnMessage { message, term, server_id } => {
+                    Input::OnMessage { message, term, server_id } => {
                         match message {
                             Message::RequestVote { version } => {
-                                OutputIterator::RejectedVote {
-                                    server_id: server_id.clone()
-                                }
+                                rejected_vote(server_id.clone())
                             },
                             Message::ApplyEntriesRequest {
                                         entries, log_version
@@ -361,7 +416,7 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
                                 )
                             },
                             Message::VoteAccepted | Message::VoteRejected => {
-                                OutputIterator::Ignore
+                                do_nothing()
                             },
                             Message::EntriesApplied {} => {
                                 unimplemented!()
@@ -371,11 +426,37 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
                             },
                         }
                     },
-                    RaftInput::Timeout => {
+                    Input::Timeout => {
                         unreachable!("No timer should have been set")
                     },
                 }
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn happy_path() {
+        let mut server_ids = HashSet::new();
+        server_ids.insert("a");
+        server_ids.insert("b");
+        server_ids.insert("c");
+
+        let mut a: Node<&str, &str> = Node::new("a", server_ids.clone());
+        let mut b: Node<&str, &str> = Node::new("b", server_ids.clone());
+
+        let mut iter = a.process(&Input::ClientRequest { entry: "1.1" });
+
+        assert_eq!(
+            iter.next().unwrap(),
+            Action::ClientRequestRejected {
+                current_leader: None,
+            },
+        );
+        assert!(iter.next().is_none());
     }
 }
