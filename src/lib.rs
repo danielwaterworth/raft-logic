@@ -55,10 +55,32 @@ fn compare_log_versions(a: LogVersion, b: LogVersion) -> Ordering {
     }
 }
 
+enum FollowerState<ServerID> {
+    Oblivious,
+    Voted(ServerID),
+    Following(ServerID),
+}
+
+impl<ServerID> FollowerState<ServerID> {
+    fn can_vote(&self) -> bool {
+        match self {
+            FollowerState::Oblivious => true,
+            _ => false,
+        }
+    }
+}
+
+impl<ServerID: Clone> FollowerState<ServerID> {
+    fn current_leader(&self) -> Option<ServerID> {
+        match self {
+            FollowerState::Following(leader) => Some(leader.clone()),
+            _ => None,
+        }
+    }
+}
+
 enum State<ServerID> {
-    Follower {
-        voted_for: Option<ServerID>,
-    },
+    Follower(FollowerState<ServerID>),
     Candidate {
         votes_received: HashSet<ServerID>,
     },
@@ -132,7 +154,6 @@ pub enum Operation<'a, ServerID, Entry> {
     AcceptedVote { server_id: ServerID },
     RejectedVote { server_id: ServerID },
     AcceptedClientRequest,
-    RejectedClientRequest,
     EntriesApplied,
     EntriesNotApplied,
     TransitionToFollower {
@@ -161,9 +182,6 @@ impl<'a, ServerID, Entry> Iterator for Operation<'a, ServerID, Entry> {
                 unimplemented!()
             },
             Operation::AcceptedClientRequest => {
-                unimplemented!()
-            },
-            Operation::RejectedClientRequest => {
                 unimplemented!()
             },
             Operation::EntriesApplied => {
@@ -214,12 +232,13 @@ fn accepted_client_request<'a, ServerID, Entry>()
     unimplemented!()
 }
 
-fn rejected_client_request<'a, ServerID, Entry>()
-        -> Operation<'a, ServerID, Entry> {
+fn rejected_client_request<'a, ServerID, Entry>(
+            current_leader: Option<ServerID>,
+        ) -> Operation<'a, ServerID, Entry> {
     Operation::OneAction(
         Singleton::new(
             Action::ClientRequestRejected {
-                current_leader: None
+                current_leader
             }
         )
     )
@@ -259,7 +278,7 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
             server_id,
             servers,
             current_term: 0,
-            state: State::Follower { voted_for: None },
+            state: State::Follower(FollowerState::Oblivious),
             log: Log::empty(),
         }
     }
@@ -273,7 +292,10 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
                 }
                 if *term > self.current_term {
                     self.current_term = *term;
-                    self.state = State::Follower { voted_for: None };
+                    self.state =
+                        State::Follower(
+                            FollowerState::Oblivious
+                        );
                     return transition_to_follower(self.process(input));
                 }
             },
@@ -281,10 +303,12 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
         }
 
         match &mut self.state {
-            State::Follower { voted_for } => {
+            State::Follower(follower_state) => {
                 match input {
                     Input::ClientRequest { entry } => {
-                        rejected_client_request()
+                        rejected_client_request(
+                            follower_state.current_leader(),
+                        )
                     },
                     Input::OnMessage { message, term, server_id } => {
                         match message {
@@ -295,8 +319,11 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
                                         self.log.version(),
                                     ) != Ordering::Less;
 
-                                if voted_for.is_none() && cmp {
-                                    *voted_for = Some(server_id.clone());
+                                if follower_state.can_vote() && cmp {
+                                    *follower_state =
+                                        FollowerState::Voted(
+                                            server_id.clone()
+                                        );
                                     accepted_vote(server_id.clone())
                                 } else {
                                     rejected_vote(server_id.clone())
@@ -339,7 +366,7 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
             State::Candidate { votes_received } => {
                 match input {
                     Input::ClientRequest { entry } => {
-                        rejected_client_request()
+                        rejected_client_request(None)
                     },
                     Input::OnMessage { message, term, server_id } => {
                         match message {
@@ -350,10 +377,11 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
                                         entries, log_version
                                     } => {
                                 self.state =
-                                    State::Follower {
-                                        voted_for:
-                                            Some(self.server_id.clone())
-                                    };
+                                    State::Follower(
+                                        FollowerState::Following(
+                                            self.server_id.clone()
+                                        )
+                                    );
 
                                 transition_to_follower(self.process(input))
                             },
