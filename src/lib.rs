@@ -300,6 +300,22 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
         }
     }
 
+    fn transition_to_candidate(&mut self) -> Operation<ServerID, Entry> {
+        self.current_term += 1;
+
+        self.state =
+            State::Candidate {
+                votes_received: HashSet::default(),
+            };
+
+        transition_to_candidate(
+            self.current_term,
+            &self.servers,
+            &self.server_id,
+            self.log.version(),
+        )
+    }
+
     pub fn process(&mut self, input: &Input<ServerID, Entry>)
             -> Operation<ServerID, Entry> {
         match input {
@@ -369,19 +385,7 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
                         }
                     },
                     Input::Timeout => {
-                        self.current_term += 1;
-
-                        self.state =
-                            State::Candidate {
-                                votes_received: HashSet::default(),
-                            };
-
-                        transition_to_candidate(
-                            self.current_term,
-                            &self.servers,
-                            &self.server_id,
-                            self.log.version(),
-                        )
+                        self.transition_to_candidate()
                     },
                 }
             },
@@ -435,19 +439,7 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
                         }
                     },
                     Input::Timeout => {
-                        self.current_term += 1;
-
-                        self.state =
-                            State::Candidate {
-                                votes_received: HashSet::default(),
-                            };
-
-                        transition_to_candidate(
-                            self.current_term,
-                            &self.servers,
-                            &self.server_id,
-                            self.log.version(),
-                        )
+                        self.transition_to_candidate()
                     },
                 }
             },
