@@ -29,8 +29,34 @@ impl<Entry> Log<Entry> {
         unimplemented!()
     }
 
+    fn next_index(&self) -> LogIndex {
+        self.log.len() as u64 +
+        match self.last_committed {
+            None => 0,
+            Some(x) => x.0
+        }
+    }
+
+    fn last_index(&self) -> Option<LogIndex> {
+        match self.next_index() {
+            0 => None,
+            x => Some(x - 1),
+        }
+    }
+
+    fn last_term(&self) -> Option<Term> {
+        self.log
+            .back()
+            .map(|(term, _)| *term)
+            .or(self.last_committed.map(|(term, _)| term))
+    }
+
     fn version(&self) -> LogVersion {
-        unimplemented!()
+        self.last_index().and_then(|index|
+            self.last_term().map(|term|
+                (term, index)
+            )
+        )
     }
 }
 
@@ -189,7 +215,7 @@ impl<'a, ServerID, Entry> Iterator for Operation<'a, ServerID, Entry> {
                 unimplemented!()
             },
             Operation::FreeForm(ref mut items) => {
-                unimplemented!()
+                items.pop_front()
             },
             Operation::TransitionToFollower { then } => {
                 let mut tmp = do_nothing();
@@ -254,7 +280,7 @@ fn transition_to_candidate<'a, ServerID: Clone, Entry>(
         ) -> Operation<'a, ServerID, Entry>
             where
                 ServerID: Hash + Eq {
-    let actions =
+    let mut actions: VecDeque<Action<ServerID, Entry>> =
         servers
             .iter()
             .filter(|server_id| *server_id != except)
@@ -269,6 +295,9 @@ fn transition_to_candidate<'a, ServerID: Clone, Entry>(
                 }
             )
             .collect();
+    actions.push_back(
+        Action::SetTimeout,
+    );
 
     Operation::FreeForm(actions)
 }
@@ -496,6 +525,7 @@ mod tests {
         let mut a: Node<&str, &str> = Node::new("a", server_ids.clone());
         let mut b: Node<&str, &str> = Node::new("b", server_ids.clone());
 
+        // We expect client requests to fail at this point
         let mut iter = a.process(&Input::ClientRequest { entry: "1.1" });
 
         assert_eq!(
@@ -506,9 +536,28 @@ mod tests {
         );
         assert!(iter.next().is_none());
 
-        let operations: Vec<Action<&str, &str>> =
+        // A timeout here should trigger an election
+        let actions: Vec<Action<&str, &str>> =
             a.process(&Input::Timeout).collect();
 
-        assert_eq!(operations.len(), 2);
+        assert_eq!(actions.len(), 3);
+
+        let expected_actions = [
+            Action::SendMessage {
+                term: 1,
+                server_id: "b",
+                message: Message::RequestVote { version: None }
+            },
+            Action::SendMessage {
+                term: 1,
+                server_id: "c",
+                message: Message::RequestVote { version: None }
+            },
+            Action::SetTimeout,
+        ];
+
+        for expected_action in expected_actions.iter() {
+            assert!(actions.contains(expected_action));
+        }
     }
 }
