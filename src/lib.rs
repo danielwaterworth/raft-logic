@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hash;
 use std::cmp::Ordering;
 use std::mem;
+use std::fmt::Debug;
 
 type Term = u64;
 type LogIndex = u64;
@@ -605,6 +606,22 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
 mod tests {
     use super::*;
 
+    fn expect_actions<ServerID, Entry>(
+                node: &mut Node<ServerID, Entry>,
+                input: &Input<ServerID, Entry>,
+                expected_actions: Vec<Action<ServerID, Entry>>,
+            ) where
+                ServerID: Hash + Eq + Debug + Clone,
+                Entry: Hash + Eq + Debug + Clone, {
+        let actions: HashSet<Action<ServerID, Entry>> =
+            node.process(input).collect();
+
+        let expected_actions: HashSet<Action<ServerID, Entry>> =
+            expected_actions.into_iter().collect();
+
+        assert_eq!(actions, expected_actions);
+    }
+
     #[test]
     fn happy_path() {
         let mut server_ids = HashSet::new();
@@ -616,207 +633,182 @@ mod tests {
         let mut b: Node<&str, &str> = Node::new("b", server_ids.clone());
 
         // We expect client requests to fail at this point
-        let actions: HashSet<Action<&str, &str>> =
-            a.process(
-                &Input::ClientRequest {
-                    entry: "1.1",
-                },
-            ).collect();
-
-        let expected_actions = vec![
-            Action::ClientRequestRejected {
-                current_leader: None,
+        expect_actions(
+            &mut a,
+            &Input::ClientRequest {
+                entry: "1.1",
             },
-        ].into_iter().collect();
-
-        assert_eq!(actions, expected_actions);
+            vec![
+                Action::ClientRequestRejected {
+                    current_leader: None,
+                },
+            ],
+        );
 
         // A timeout here should trigger an election
-        let actions: HashSet<Action<&str, &str>> =
-            a.process(&Input::Timeout).collect();
-
-        let expected_actions = vec![
-            Action::SendMessage {
-                term: 1,
-                server_id: "b",
-                message: Message::RequestVote { version: None },
-            },
-            Action::SendMessage {
-                term: 1,
-                server_id: "c",
-                message: Message::RequestVote { version: None },
-            },
-            Action::SetTimeout,
-        ].into_iter().collect();
-
-        assert_eq!(actions, expected_actions);
+        expect_actions(
+            &mut a,
+            &Input::Timeout,
+            vec![
+                Action::SendMessage {
+                    term: 1,
+                    server_id: "b",
+                    message: Message::RequestVote { version: None },
+                },
+                Action::SendMessage {
+                    term: 1,
+                    server_id: "c",
+                    message: Message::RequestVote { version: None },
+                },
+                Action::SetTimeout,
+            ],
+        );
 
         // Let's pass on the vote request to b
-        let actions: HashSet<Action<&str, &str>> =
-            b.process(
-                &Input::OnMessage {
-                    message: Message::RequestVote { version: None },
-                    server_id: "a",
-                    term: 1,
-                },
-            ).collect();
-
-        let expected_actions = vec![
-            Action::SetTimeout,
-            Action::SendMessage {
+        expect_actions(
+            &mut b,
+            &Input::OnMessage {
+                message: Message::RequestVote { version: None },
                 server_id: "a",
                 term: 1,
-                message: Message::VoteAccepted,
             },
-        ].into_iter().collect();
-
-        assert_eq!(actions, expected_actions);
+            vec![
+                Action::SetTimeout,
+                Action::SendMessage {
+                    server_id: "a",
+                    term: 1,
+                    message: Message::VoteAccepted,
+                },
+            ],
+        );
 
         // Let's pass the response back to a
-        let actions: HashSet<Action<&str, &str>> =
-            a.process(
-                &Input::OnMessage {
-                    message: Message::VoteAccepted,
-                    server_id: "b",
-                    term: 1,
-                },
-            ).collect();
-
-        let expected_actions = vec![
-            Action::SendMessage {
-                term: 1,
+        expect_actions(
+            &mut a,
+            &Input::OnMessage {
+                message: Message::VoteAccepted,
                 server_id: "b",
-                message:
-                    Message::ApplyEntriesRequest {
-                        log_version: None,
-                        entries: Vec::new(),
-                    },
-            },
-            Action::SendMessage {
                 term: 1,
-                server_id: "c",
-                message:
-                    Message::ApplyEntriesRequest {
-                        log_version: None,
-                        entries: Vec::new(),
-                    },
             },
-            Action::ClearTimeout,
-        ].into_iter().collect();
-
-        assert_eq!(actions, expected_actions);
-
-        // Let's pass on the heartbeat message to b
-        let actions: HashSet<Action<&str, &str>> =
-            b.process(
-                &Input::OnMessage {
+            vec![
+                Action::SendMessage {
+                    term: 1,
+                    server_id: "b",
                     message:
                         Message::ApplyEntriesRequest {
                             log_version: None,
                             entries: Vec::new(),
                         },
-                    server_id: "a",
-                    term: 1,
                 },
-            ).collect();
+                Action::SendMessage {
+                    term: 1,
+                    server_id: "c",
+                    message:
+                        Message::ApplyEntriesRequest {
+                            log_version: None,
+                            entries: Vec::new(),
+                        },
+                },
+                Action::ClearTimeout,
+            ],
+        );
 
-        let expected_actions = vec![
-            Action::SetTimeout,
-            Action::SendMessage {
-                term: 1,
-                server_id: "a",
+        // Let's pass on the heartbeat message to b
+        expect_actions(
+            &mut b,
+            &Input::OnMessage {
                 message:
-                    Message::EntriesApplied {
+                    Message::ApplyEntriesRequest {
+                        log_version: None,
+                        entries: Vec::new(),
                     },
+                server_id: "a",
+                term: 1,
             },
-        ].into_iter().collect();
-
-        assert_eq!(actions, expected_actions);
-
-        // b should now consider a the leader, let's check with a client
-        // request
-        let actions: HashSet<Action<&str, &str>> =
-            b.process(
-                &Input::ClientRequest {
-                    entry: "1.2",
-                },
-            ).collect();
-
-        let expected_actions = vec![
-            Action::ClientRequestRejected {
-                current_leader: Some("a"),
-            },
-        ].into_iter().collect();
-
-        assert_eq!(actions, expected_actions);
-
-        // Let's pass the entries-applied message back to a
-        let actions: HashSet<Action<&str, &str>> =
-            a.process(
-                &Input::OnMessage {
-                    server_id: "b",
+            vec![
+                Action::SetTimeout,
+                Action::SendMessage {
                     term: 1,
+                    server_id: "a",
                     message:
                         Message::EntriesApplied {
                         },
                 },
-            ).collect();
+            ],
+        );
 
-        let expected_actions = vec![
-        ].into_iter().collect();
+        // b should now consider a the leader, let's check with a client
+        // request
+        expect_actions(
+            &mut b,
+            &Input::ClientRequest {
+                entry: "1.2",
+            },
+            vec![
+                Action::ClientRequestRejected {
+                    current_leader: Some("a"),
+                },
+            ],
+        );
 
-        assert_eq!(actions, expected_actions);
+        // Let's pass the entries-applied message back to a
+        expect_actions(
+            &mut a,
+            &Input::OnMessage {
+                server_id: "b",
+                term: 1,
+                message:
+                    Message::EntriesApplied {
+                    },
+            },
+            vec![
+            ],
+        );
 
         // Working up to here
         return;
 
         // Having established leadership, let's publish a message
-        let actions: HashSet<Action<&str, &str>> =
-            a.process(
-                &Input::ClientRequest {
-                    entry: "1.3",
-                },
-            ).collect();
-
-        let expected_actions = vec![
-            Action::SendMessage {
-                term: 1,
-                server_id: "b",
-                message:
-                    Message::ApplyEntriesRequest {
-                        log_version: None,
-                        entries: vec![(1, "1.3")],
-                    },
+        expect_actions(
+            &mut a,
+            &Input::ClientRequest {
+                entry: "1.3",
             },
-        ].into_iter().collect();
-
-        assert_eq!(actions, expected_actions);
-
-        // Let's pass on the message to b
-        let actions: HashSet<Action<&str, &str>> =
-            b.process(
-                &Input::OnMessage {
+            vec![
+                Action::SendMessage {
                     term: 1,
-                    server_id: "a",
+                    server_id: "b",
                     message:
                         Message::ApplyEntriesRequest {
                             log_version: None,
                             entries: vec![(1, "1.3")],
                         },
                 },
-            ).collect();
+            ],
+        );
 
-        let expected_actions = vec![
-            Action::SendMessage {
+        // Let's pass on the message to b
+        expect_actions(
+            &mut b,
+            &Input::OnMessage {
                 term: 1,
                 server_id: "a",
                 message:
-                    Message::EntriesApplied {
+                    Message::ApplyEntriesRequest {
+                        log_version: None,
+                        entries: vec![(1, "1.3")],
                     },
             },
-            Action::SetTimeout,
-        ].into_iter().collect();
-
-        assert_eq!(actions, expected_actions);
+            vec![
+                Action::SendMessage {
+                    term: 1,
+                    server_id: "a",
+                    message:
+                        Message::EntriesApplied {
+                        },
+                },
+                Action::SetTimeout,
+            ],
+        );
     }
 }
