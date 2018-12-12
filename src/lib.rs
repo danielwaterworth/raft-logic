@@ -1,8 +1,17 @@
+#![feature(never_type)]
+
 mod singleton;
 mod log;
 
 use crate::singleton::Singleton;
-use crate::log::{Log, Term, LogIndex, LogVersion};
+use crate::log::{
+    Log,
+    Term,
+    LogIndex,
+    LogVersion,
+    TestLog,
+    compare_log_versions
+};
 
 use std::time::Duration;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -10,27 +19,6 @@ use std::hash::Hash;
 use std::cmp::Ordering;
 use std::mem;
 use std::fmt::Debug;
-
-fn compare_log_versions(a: LogVersion, b: LogVersion) -> Ordering {
-    match (a, b) {
-        (None, None) => Ordering::Equal,
-        (None, _) => Ordering::Less,
-        (_, None) => Ordering::Greater,
-        (Some((a_index, a_term)), Some((b_index, b_term))) => {
-            match a_index.cmp(&b_index) {
-                Ordering::Less => {
-                    Ordering::Less
-                },
-                Ordering::Greater => {
-                    Ordering::Greater
-                },
-                Ordering::Equal => {
-                    a_term.cmp(&b_term)
-                },
-            }
-        }
-    }
-}
 
 enum FollowerState<ServerID> {
     Oblivious,
@@ -67,14 +55,14 @@ enum State<ServerID> {
     },
 }
 
-pub struct Node<ServerID: Hash + Eq, Entry> {
+pub struct Node<ServerID: Hash + Eq, L: Log> {
     server_id: ServerID,
     servers: HashSet<ServerID>,
 
     current_term: Term,
     state: State<ServerID>,
 
-    log: Log<Entry>,
+    log: L,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -322,19 +310,19 @@ fn entries_not_applied<'a, ServerID, Entry>(
     unimplemented!()
 }
 
-impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
+impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
     pub fn new(server_id: ServerID, servers: HashSet<ServerID>)
-            -> Node<ServerID, Entry> {
+            -> Node<ServerID, L> {
         Node {
             server_id,
             servers,
             current_term: 0,
             state: State::Follower(FollowerState::Oblivious),
-            log: Log::empty(),
+            log: L::empty(),
         }
     }
 
-    fn transition_to_candidate(&mut self) -> Operation<ServerID, Entry> {
+    fn transition_to_candidate(&mut self) -> Operation<ServerID, L::Entry> {
         self.current_term += 1;
 
         self.state =
@@ -350,8 +338,8 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
         )
     }
 
-    pub fn process(&mut self, input: &Input<ServerID, Entry>)
-            -> Operation<ServerID, Entry> {
+    pub fn process(&mut self, input: &Input<ServerID, L::Entry>)
+            -> Operation<ServerID, L::Entry> {
         match input {
             Input::OnMessage { message, term, server_id } => {
                 if self.current_term > *term {
@@ -414,7 +402,7 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
                                     );
                                 if self.log.version() == *log_version {
                                     for entry in entries {
-                                        self.log.insert(
+                                        self.log.append(
                                             entry.0,
                                             entry.1.clone(),
                                         );
@@ -512,8 +500,7 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
             State::Leader { next_index, match_index } => {
                 match input {
                     Input::ClientRequest { entry } => {
-                        let log_id =
-                            self.log.insert(self.current_term, entry.clone());
+                        self.log.append(self.current_term, entry.clone());
                         accepted_client_request()
                     },
                     Input::OnMessage { message, term, server_id } => {
@@ -556,17 +543,17 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
 mod tests {
     use super::*;
 
-    fn expect_actions<ServerID, Entry>(
-                node: &mut Node<ServerID, Entry>,
-                input: &Input<ServerID, Entry>,
-                expected_actions: Vec<Action<ServerID, Entry>>,
+    fn expect_actions<ServerID, L: Log>(
+                node: &mut Node<ServerID, L>,
+                input: &Input<ServerID, L::Entry>,
+                expected_actions: Vec<Action<ServerID, L::Entry>>,
             ) where
                 ServerID: Hash + Eq + Debug + Clone,
-                Entry: Hash + Eq + Debug + Clone, {
-        let actions: HashSet<Action<ServerID, Entry>> =
+                L::Entry: Hash + Eq + Debug {
+        let actions: HashSet<Action<ServerID, L::Entry>> =
             node.process(input).collect();
 
-        let expected_actions: HashSet<Action<ServerID, Entry>> =
+        let expected_actions: HashSet<Action<ServerID, L::Entry>> =
             expected_actions.into_iter().collect();
 
         assert_eq!(actions, expected_actions);
@@ -579,7 +566,7 @@ mod tests {
         server_ids.insert("b");
         server_ids.insert("c");
 
-        let mut a: Node<&str, &str> = Node::new("a", server_ids.clone());
+        let mut a: Node<&str, TestLog> = Node::new("a", server_ids.clone());
 
         // Start an election
         expect_actions(
@@ -631,7 +618,7 @@ mod tests {
         server_ids.insert("b");
         server_ids.insert("c");
 
-        let mut a: Node<&str, &str> = Node::new("a", server_ids.clone());
+        let mut a: Node<&str, TestLog> = Node::new("a", server_ids.clone());
 
         // Start an election
         expect_actions(
@@ -708,8 +695,8 @@ mod tests {
         server_ids.insert("b");
         server_ids.insert("c");
 
-        let mut a: Node<&str, &str> = Node::new("a", server_ids.clone());
-        let mut b: Node<&str, &str> = Node::new("b", server_ids.clone());
+        let mut a: Node<&str, TestLog> = Node::new("a", server_ids.clone());
+        let mut b: Node<&str, TestLog> = Node::new("b", server_ids.clone());
 
         // We expect client requests to fail at this point
         expect_actions(
