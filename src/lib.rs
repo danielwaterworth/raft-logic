@@ -623,6 +623,83 @@ mod tests {
     }
 
     #[test]
+    fn failed_election() {
+        let mut server_ids = HashSet::new();
+        server_ids.insert("a");
+        server_ids.insert("b");
+        server_ids.insert("c");
+
+        let mut a: Node<&str, &str> = Node::new("a", server_ids.clone());
+
+        // Start an election
+        expect_actions(
+            &mut a,
+            &Input::Timeout,
+            vec![
+                Action::SendMessage {
+                    term: 1,
+                    server_id: "b",
+                    message: Message::RequestVote { version: None },
+                },
+                Action::SendMessage {
+                    term: 1,
+                    server_id: "c",
+                    message: Message::RequestVote { version: None },
+                },
+                Action::SetTimeout,
+            ],
+        );
+
+        // Another candidate asks for a vote
+        expect_actions(
+            &mut a,
+            &Input::OnMessage {
+                message: Message::RequestVote { version: None },
+                server_id: "b",
+                term: 1,
+            },
+            vec![
+                Action::SendMessage {
+                    server_id: "b",
+                    term: 1,
+                    message: Message::VoteRejected,
+                },
+            ],
+        );
+
+        // Our vote has been rejected
+        expect_actions(
+            &mut a,
+            &Input::OnMessage {
+                message: Message::VoteRejected,
+                server_id: "b",
+                term: 1,
+            },
+            vec![
+            ],
+        );
+
+        // Trigger another election
+        expect_actions(
+            &mut a,
+            &Input::Timeout,
+            vec![
+                Action::SetTimeout,
+                Action::SendMessage {
+                    term: 2,
+                    server_id: "b",
+                    message: Message::RequestVote { version: None },
+                },
+                Action::SendMessage {
+                    term: 2,
+                    server_id: "c",
+                    message: Message::RequestVote { version: None },
+                },
+            ],
+        );
+    }
+
+    #[test]
     fn happy_path() {
         let mut server_ids = HashSet::new();
         server_ids.insert("a");
