@@ -126,7 +126,7 @@ pub struct Node<ServerID: Hash + Eq, Entry> {
     log: Log<Entry>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub enum Message<Entry> {
     ApplyEntriesRequest {
         log_version: LogVersion,
@@ -159,7 +159,7 @@ pub enum Input<ServerID, Entry> {
     Timeout,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub enum Action<ServerID, Entry> {
     AckClientRequest,
     ClientRequestRejected {
@@ -178,7 +178,6 @@ pub enum Action<ServerID, Entry> {
 pub enum Operation<'a, ServerID, Entry> {
     DoNothing,
     OneAction(Singleton<Action<ServerID, Entry>>),
-    RejectedVote { server_id: ServerID },
     AcceptedClientRequest,
     EntriesApplied,
     EntriesNotApplied,
@@ -198,9 +197,6 @@ impl<'a, ServerID, Entry> Iterator for Operation<'a, ServerID, Entry> {
             Operation::DoNothing => None,
             Operation::OneAction(iter) => {
                 iter.next()
-            },
-            Operation::RejectedVote { server_id } => {
-                unimplemented!()
             },
             Operation::AcceptedClientRequest => {
                 unimplemented!()
@@ -245,11 +241,17 @@ fn accepted_vote<'a, ServerID, Entry>(term: Term, server_id: ServerID)
     )
 }
 
-fn rejected_vote<'a, ServerID, Entry>(server_id: ServerID)
+fn rejected_vote<'a, ServerID, Entry>(term: Term, server_id: ServerID)
         -> Operation<'a, ServerID, Entry> {
-    Operation::RejectedVote {
-        server_id
-    }
+    Operation::OneAction(
+        Singleton::new(
+            Action::SendMessage {
+                term,
+                server_id,
+                message: Message::VoteRejected,
+            }
+        )
+    )
 }
 
 fn accepted_client_request<'a, ServerID, Entry>()
@@ -339,15 +341,31 @@ fn transition_to_leader<'a, ServerID, Entry>(
 }
 
 fn entries_applied<'a, ServerID, Entry>(
+        term: Term,
         leader: ServerID,
     ) -> Operation<'a, ServerID, Entry> {
-    // ResetTimeout
-    // Reply to leader
-    unimplemented!()
+    let mut actions: VecDeque<Action<ServerID, Entry>> = VecDeque::new();
+    actions.push_back(
+        Action::SetTimeout,
+    );
+    actions.push_back(
+        Action::SendMessage {
+            term,
+            server_id: leader,
+            message:
+                Message::EntriesApplied {
+
+                },
+        },
+    );
+
+    Operation::FreeForm(actions)
 }
 
-fn entries_not_applied<'a, ServerID, Entry>()
-        -> Operation<'a, ServerID, Entry> {
+fn entries_not_applied<'a, ServerID, Entry>(
+        term: Term,
+        leader: ServerID,
+    ) -> Operation<'a, ServerID, Entry> {
     // ResetTimeout
     // Reply to leader
     unimplemented!()
@@ -427,7 +445,10 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
                                         server_id.clone(),
                                     )
                                 } else {
-                                    rejected_vote(server_id.clone())
+                                    rejected_vote(
+                                        self.current_term,
+                                        server_id.clone(),
+                                    )
                                 }
                             },
                             Message::InstallSnapshot => {
@@ -448,10 +469,14 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
                                         );
                                     }
                                     entries_applied(
+                                        *term,
                                         server_id.clone(),
                                     )
                                 } else {
-                                    entries_not_applied()
+                                    entries_not_applied(
+                                        *term,
+                                        server_id.clone(),
+                                    )
                                 }
                             },
                             Message::VoteAccepted | Message::VoteRejected => {
@@ -479,7 +504,10 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
                     Input::OnMessage { message, term, server_id } => {
                         match message {
                             Message::RequestVote { version } => {
-                                rejected_vote(server_id.clone())
+                                rejected_vote(
+                                    *term,
+                                    server_id.clone(),
+                                )
                             },
                             Message::ApplyEntriesRequest { .. }
                             | Message::InstallSnapshot => {
@@ -540,7 +568,10 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
                     Input::OnMessage { message, term, server_id } => {
                         match message {
                             Message::RequestVote { version } => {
-                                rejected_vote(server_id.clone())
+                                rejected_vote(
+                                    *term,
+                                    server_id.clone(),
+                                )
                             },
                             Message::ApplyEntriesRequest { .. }
                             | Message::InstallSnapshot => {
@@ -552,10 +583,12 @@ impl<ServerID: Hash + Eq + Clone, Entry: Clone> Node<ServerID, Entry> {
                                 do_nothing()
                             },
                             Message::EntriesApplied {} => {
-                                unimplemented!()
+                                // FIXME: update internal state
+                                do_nothing()
                             },
                             Message::EntriesNotApplied {} => {
-                                unimplemented!()
+                                // FIXME: update internal state
+                                do_nothing()
                             },
                         }
                     },
@@ -583,76 +616,73 @@ mod tests {
         let mut b: Node<&str, &str> = Node::new("b", server_ids.clone());
 
         // We expect client requests to fail at this point
-        let mut iter = a.process(&Input::ClientRequest { entry: "1.1" });
+        let actions: HashSet<Action<&str, &str>> =
+            a.process(
+                &Input::ClientRequest {
+                    entry: "1.1",
+                },
+            ).collect();
 
-        assert_eq!(
-            iter.next().unwrap(),
+        let expected_actions = vec![
             Action::ClientRequestRejected {
                 current_leader: None,
             },
-        );
-        assert!(iter.next().is_none());
+        ].into_iter().collect();
+
+        assert_eq!(actions, expected_actions);
 
         // A timeout here should trigger an election
-        let actions: Vec<Action<&str, &str>> =
+        let actions: HashSet<Action<&str, &str>> =
             a.process(&Input::Timeout).collect();
 
-        assert_eq!(actions.len(), 3);
-
-        let expected_actions = [
+        let expected_actions = vec![
             Action::SendMessage {
                 term: 1,
                 server_id: "b",
-                message: Message::RequestVote { version: None }
+                message: Message::RequestVote { version: None },
             },
             Action::SendMessage {
                 term: 1,
                 server_id: "c",
-                message: Message::RequestVote { version: None }
+                message: Message::RequestVote { version: None },
             },
             Action::SetTimeout,
-        ];
+        ].into_iter().collect();
 
-        for expected_action in expected_actions.iter() {
-            assert!(actions.contains(expected_action));
-        }
+        assert_eq!(actions, expected_actions);
 
         // Let's pass on the vote request to b
-        let mut iter =
+        let actions: HashSet<Action<&str, &str>> =
             b.process(
                 &Input::OnMessage {
                     message: Message::RequestVote { version: None },
                     server_id: "a",
                     term: 1,
-                });
+                },
+            ).collect();
 
-        assert_eq!(
-            iter.next().unwrap(),
+        let expected_actions = vec![
             Action::SetTimeout,
-        );
-        assert_eq!(
-            iter.next().unwrap(),
             Action::SendMessage {
                 server_id: "a",
                 term: 1,
                 message: Message::VoteAccepted,
             },
-        );
-        assert!(iter.next().is_none());
+        ].into_iter().collect();
+
+        assert_eq!(actions, expected_actions);
 
         // Let's pass the response back to a
-        let mut iter =
+        let actions: HashSet<Action<&str, &str>> =
             a.process(
                 &Input::OnMessage {
                     message: Message::VoteAccepted,
                     server_id: "b",
                     term: 1,
-                });
-        let actions: Vec<Action<&str, &str>> = iter.collect();
+                },
+            ).collect();
 
-        assert_eq!(actions.len(), 3);
-
-        let expected_actions = [
+        let expected_actions = vec![
             Action::SendMessage {
                 term: 1,
                 server_id: "b",
@@ -660,7 +690,7 @@ mod tests {
                     Message::ApplyEntriesRequest {
                         log_version: None,
                         entries: Vec::new(),
-                    }
+                    },
             },
             Action::SendMessage {
                 term: 1,
@@ -669,17 +699,15 @@ mod tests {
                     Message::ApplyEntriesRequest {
                         log_version: None,
                         entries: Vec::new(),
-                    }
+                    },
             },
             Action::ClearTimeout,
-        ];
+        ].into_iter().collect();
 
-        for expected_action in expected_actions.iter() {
-            assert!(actions.contains(expected_action));
-        }
+        assert_eq!(actions, expected_actions);
 
-        // Let's pass on a heartbeat message to b
-        let mut iter =
+        // Let's pass on the heartbeat message to b
+        let actions: HashSet<Action<&str, &str>> =
             b.process(
                 &Input::OnMessage {
                     message:
@@ -689,12 +717,106 @@ mod tests {
                         },
                     server_id: "a",
                     term: 1,
-                });
+                },
+            ).collect();
 
-        assert_eq!(
-            iter.next().unwrap(),
+        let expected_actions = vec![
             Action::SetTimeout,
-        );
-        assert!(iter.next().is_none());
+            Action::SendMessage {
+                term: 1,
+                server_id: "a",
+                message:
+                    Message::EntriesApplied {
+                    },
+            },
+        ].into_iter().collect();
+
+        assert_eq!(actions, expected_actions);
+
+        // b should now consider a the leader, let's check with a client
+        // request
+        let actions: HashSet<Action<&str, &str>> =
+            b.process(
+                &Input::ClientRequest {
+                    entry: "1.2",
+                },
+            ).collect();
+
+        let expected_actions = vec![
+            Action::ClientRequestRejected {
+                current_leader: Some("a"),
+            },
+        ].into_iter().collect();
+
+        assert_eq!(actions, expected_actions);
+
+        // Let's pass the entries-applied message back to a
+        let actions: HashSet<Action<&str, &str>> =
+            a.process(
+                &Input::OnMessage {
+                    server_id: "b",
+                    term: 1,
+                    message:
+                        Message::EntriesApplied {
+                        },
+                },
+            ).collect();
+
+        let expected_actions = vec![
+        ].into_iter().collect();
+
+        assert_eq!(actions, expected_actions);
+
+        // Working up to here
+        return;
+
+        // Having established leadership, let's publish a message
+        let actions: HashSet<Action<&str, &str>> =
+            a.process(
+                &Input::ClientRequest {
+                    entry: "1.3",
+                },
+            ).collect();
+
+        let expected_actions = vec![
+            Action::SendMessage {
+                term: 1,
+                server_id: "b",
+                message:
+                    Message::ApplyEntriesRequest {
+                        log_version: None,
+                        entries: vec![(1, "1.3")],
+                    },
+            },
+        ].into_iter().collect();
+
+        assert_eq!(actions, expected_actions);
+
+        // Let's pass on the message to b
+        let actions: HashSet<Action<&str, &str>> =
+            b.process(
+                &Input::OnMessage {
+                    term: 1,
+                    server_id: "a",
+                    message:
+                        Message::ApplyEntriesRequest {
+                            log_version: None,
+                            entries: vec![(1, "1.3")],
+                        },
+                },
+            ).collect();
+
+        let expected_actions = vec![
+            Action::SendMessage {
+                term: 1,
+                server_id: "a",
+                message:
+                    Message::EntriesApplied {
+                    },
+            },
+            Action::SetTimeout,
+        ].into_iter().collect();
+
+        assert_eq!(actions, expected_actions);
     }
 }
