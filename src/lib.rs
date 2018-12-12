@@ -1,6 +1,8 @@
 mod singleton;
+mod log;
 
 use crate::singleton::Singleton;
+use crate::log::{Log, Term, LogIndex, LogVersion};
 
 use std::time::Duration;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -8,58 +10,6 @@ use std::hash::Hash;
 use std::cmp::Ordering;
 use std::mem;
 use std::fmt::Debug;
-
-type Term = u64;
-type LogIndex = u64;
-type LogVersion = Option<(LogIndex, Term)>;
-
-struct Log<Entry> {
-    last_committed: LogVersion,
-    log: VecDeque<(Term, Entry)>,
-}
-
-impl<Entry> Log<Entry> {
-    fn empty() -> Log<Entry> {
-        Log {
-            last_committed: None,
-            log: VecDeque::default(),
-        }
-    }
-
-    fn insert(&mut self, term: Term, entry: Entry) -> LogIndex {
-        unimplemented!()
-    }
-
-    fn next_index(&self) -> LogIndex {
-        self.log.len() as u64 +
-        match self.last_committed {
-            None => 0,
-            Some(x) => x.0
-        }
-    }
-
-    fn last_index(&self) -> Option<LogIndex> {
-        match self.next_index() {
-            0 => None,
-            x => Some(x - 1),
-        }
-    }
-
-    fn last_term(&self) -> Option<Term> {
-        self.log
-            .back()
-            .map(|(term, _)| *term)
-            .or(self.last_committed.map(|(term, _)| term))
-    }
-
-    fn version(&self) -> LogVersion {
-        self.last_index().and_then(|index|
-            self.last_term().map(|term|
-                (term, index)
-            )
-        )
-    }
-}
 
 fn compare_log_versions(a: LogVersion, b: LogVersion) -> Ordering {
     match (a, b) {
@@ -620,6 +570,58 @@ mod tests {
             expected_actions.into_iter().collect();
 
         assert_eq!(actions, expected_actions);
+    }
+
+    #[test]
+    fn candidate_step_down_same_term() {
+        let mut server_ids = HashSet::new();
+        server_ids.insert("a");
+        server_ids.insert("b");
+        server_ids.insert("c");
+
+        let mut a: Node<&str, &str> = Node::new("a", server_ids.clone());
+
+        // Start an election
+        expect_actions(
+            &mut a,
+            &Input::Timeout,
+            vec![
+                Action::SendMessage {
+                    term: 1,
+                    server_id: "b",
+                    message: Message::RequestVote { version: None },
+                },
+                Action::SendMessage {
+                    term: 1,
+                    server_id: "c",
+                    message: Message::RequestVote { version: None },
+                },
+                Action::SetTimeout,
+            ],
+        );
+
+        expect_actions(
+            &mut a,
+            &Input::OnMessage {
+                term: 1,
+                server_id: "b",
+                message:
+                    Message::ApplyEntriesRequest {
+                        log_version: None,
+                        entries: Vec::new(),
+                    },
+            },
+            vec![
+                Action::SetTimeout,
+                Action::SendMessage {
+                    term: 1,
+                    server_id: "b",
+                    message:
+                        Message::EntriesApplied {
+                        },
+                },
+            ],
+        );
     }
 
     #[test]
