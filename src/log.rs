@@ -59,18 +59,20 @@ pub trait Log {
     fn version(&self) -> LogVersion;
 }
 
+#[derive(Clone)]
 struct TestEntry {
-    value: &'static str,
+    value: usize,
     term: Term,
 }
 
+#[derive(Clone)]
 pub struct TestLog {
     entries: Vec<TestEntry>,
     next_commit_index: usize,
 }
 
 impl Log for TestLog {
-    type Entry = &'static str;
+    type Entry = usize;
     type Snapshot = !;
 
     fn empty() -> TestLog {
@@ -84,12 +86,12 @@ impl Log for TestLog {
         self.next_commit_index = (index + 1) as usize;
     }
 
-    fn insert(&mut self, prev: LogVersion, entry: (Term, &'static str))
+    fn insert(&mut self, prev: LogVersion, entry: (Term, usize))
             -> InsertResult {
         unimplemented!()
     }
 
-    fn append(&mut self, term: Term, value: &'static str) {
+    fn append(&mut self, term: Term, value: usize) {
         self.entries.push(
             TestEntry {
                 term,
@@ -98,7 +100,7 @@ impl Log for TestLog {
         );
     }
 
-    fn get(&self, index: LogIndex) -> GetResult<!, &'static str> {
+    fn get(&self, index: LogIndex) -> GetResult<!, usize> {
         unimplemented!()
     }
 

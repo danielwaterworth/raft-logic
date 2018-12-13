@@ -15,6 +15,7 @@ use std::cmp::Ordering;
 use std::mem;
 use std::fmt::Debug;
 
+#[derive(Clone)]
 enum FollowerState<ServerID> {
     Oblivious,
     Voted(ServerID),
@@ -39,6 +40,7 @@ impl<ServerID: Clone> FollowerState<ServerID> {
     }
 }
 
+#[derive(Clone)]
 enum State<ServerID> {
     Follower(FollowerState<ServerID>),
     Candidate {
@@ -50,6 +52,7 @@ enum State<ServerID> {
     },
 }
 
+#[derive(Clone)]
 pub struct Node<ServerID: Hash + Eq, L: Log> {
     server_id: ServerID,
     servers: HashSet<ServerID>,
@@ -60,7 +63,7 @@ pub struct Node<ServerID: Hash + Eq, L: Log> {
     log: L,
 }
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum Message<Entry> {
     ApplyEntriesRequest {
         commit: LogVersion,
@@ -692,7 +695,7 @@ mod tests {
         expect_actions(
             &mut a,
             &Input::ClientRequest {
-                entry: "1.1",
+                entry: 1,
             },
             vec![
                 Action::ClientRequestRejected {
@@ -802,7 +805,7 @@ mod tests {
         expect_actions(
             &mut b,
             &Input::ClientRequest {
-                entry: "1.2",
+                entry: 2,
             },
             vec![
                 Action::ClientRequestRejected {
@@ -833,7 +836,7 @@ mod tests {
         expect_actions(
             &mut a,
             &Input::ClientRequest {
-                entry: "1.3",
+                entry: 3,
             },
             vec![
                 Action::SendMessage {
@@ -843,7 +846,7 @@ mod tests {
                         Message::ApplyEntriesRequest {
                             commit: None,
                             log_version: None,
-                            entries: vec![(1, "1.3")],
+                            entries: vec![(1, 3)],
                         },
                 },
             ],
@@ -859,7 +862,7 @@ mod tests {
                     Message::ApplyEntriesRequest {
                         commit: None,
                         log_version: None,
-                        entries: vec![(1, "1.3")],
+                        entries: vec![(1, 3)],
                     },
             },
             vec![
