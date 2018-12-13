@@ -11,7 +11,7 @@ use crate::log::{
 use std::time::Duration;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hash;
-use std::cmp::Ordering;
+use std::cmp::{Ordering, max, min};
 use std::mem;
 use std::fmt::Debug;
 
@@ -40,6 +40,43 @@ impl<ServerID: Clone> FollowerState<ServerID> {
     }
 }
 
+// This is the information a leader stores about a follower
+#[derive(Clone)]
+enum FollowerInfo {
+    Unknown,
+    Tracking {
+        known_replicated: LogIndex,
+    },
+    Syncing {
+        bad_index: LogIndex,
+    },
+}
+
+impl FollowerInfo {
+    fn good(&mut self, index: LogIndex) {
+        match self {
+            FollowerInfo::Tracking { known_replicated } => {
+                *known_replicated = max(*known_replicated, index);
+            },
+            _ => {
+                *self = FollowerInfo::Tracking { known_replicated: index };
+            },
+        }
+    }
+
+    fn bad(&mut self, index: LogIndex) {
+        match self {
+            FollowerInfo::Unknown => {
+                *self = FollowerInfo::Syncing { bad_index: index };
+            },
+            FollowerInfo::Syncing { bad_index } => {
+                *bad_index = min(*bad_index, index);
+            },
+            FollowerInfo::Tracking { .. } => {},
+        }
+    }
+}
+
 #[derive(Clone)]
 enum State<ServerID> {
     Follower(FollowerState<ServerID>),
@@ -47,8 +84,7 @@ enum State<ServerID> {
         votes_received: HashSet<ServerID>,
     },
     Leader {
-        next_index: HashMap<ServerID, LogIndex>,
-        match_index: HashMap<ServerID, LogIndex>,
+        follower_infos: HashMap<ServerID, FollowerInfo>,
     },
 }
 
@@ -461,8 +497,7 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
                                 if votes * 2 > self.servers.len() {
                                     self.state =
                                         State::Leader {
-                                            next_index: HashMap::default(),
-                                            match_index: HashMap::default(),
+                                            follower_infos: HashMap::default(),
                                         };
 
                                     transition_to_leader(
@@ -491,7 +526,7 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
                     },
                 }
             },
-            State::Leader { next_index, match_index } => {
+            State::Leader { follower_infos } => {
                 match input {
                     Input::ClientRequest { entry } => {
                         self.log.append(self.current_term, entry.clone());
@@ -515,7 +550,7 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
                                 do_nothing()
                             },
                             Message::LogEntryInfo { version } => {
-                                do_nothing()
+                                unimplemented!()
                             },
                         }
                     },
@@ -814,6 +849,9 @@ mod tests {
             ],
         );
 
+        // Working up to here
+        return;
+
         // Let's pass the entries-applied message back to a
         expect_actions(
             &mut a,
@@ -828,9 +866,6 @@ mod tests {
             vec![
             ],
         );
-
-        // Working up to here
-        return;
 
         // Having established leadership, let's publish a message
         expect_actions(

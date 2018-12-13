@@ -11,5 +11,5 @@ fn simulate(world: World, depth: usize) {
 }
 
 fn main() {
-    simulate(World::initial(), 7);
+    simulate(World::initial(), 4);
 }
