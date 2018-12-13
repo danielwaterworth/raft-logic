@@ -44,6 +44,12 @@ pub enum GetResult<Snapshot, Entry> {
     Fail,
 }
 
+pub enum CheckResult {
+    Good(LogIndex),
+    Bad(LogIndex),
+    Unknown,
+}
+
 pub trait Log {
     type Entry: Clone;
     type Snapshot;
@@ -57,6 +63,7 @@ pub trait Log {
 
     fn get(&self, index: LogIndex) -> GetResult<Self::Snapshot, Self::Entry>;
     fn version(&self) -> LogVersion;
+    fn check(&self, version: LogVersion) -> CheckResult;
 }
 
 #[derive(Clone)]
@@ -108,5 +115,9 @@ impl Log for TestLog {
         self.entries.last().map(|last| {
             ((self.entries.len() - 1) as u64, last.term)
         })
+    }
+
+    fn check(&self, version: LogVersion) -> CheckResult {
+        unimplemented!()
     }
 }

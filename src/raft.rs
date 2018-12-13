@@ -1,11 +1,12 @@
 use crate::singleton::Singleton;
 use crate::log::{
+    CheckResult,
     Log,
-    Term,
     LogIndex,
     LogVersion,
+    Term,
     TestLog,
-    compare_log_versions
+    compare_log_versions,
 };
 
 use std::time::Duration;
@@ -550,6 +551,12 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
                                 do_nothing()
                             },
                             Message::LogEntryInfo { version } => {
+                                let mut follower_info =
+                                    follower_infos
+                                        .entry(server_id.clone())
+                                        .or_insert(FollowerInfo::Unknown);
+
+                                let x = self.log.check(*version);
                                 unimplemented!()
                             },
                         }
