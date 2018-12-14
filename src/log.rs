@@ -1,5 +1,5 @@
-use std::collections::{VecDeque};
 use std::cmp::Ordering;
+use std::collections::VecDeque;
 
 pub type Term = u64;
 pub type LogIndex = u64;
@@ -12,24 +12,16 @@ pub fn compare_log_versions(a: LogVersion, b: LogVersion) -> Ordering {
         (_, None) => Ordering::Greater,
         (Some((a_index, a_term)), Some((b_index, b_term))) => {
             match a_index.cmp(&b_index) {
-                Ordering::Less => {
-                    Ordering::Less
-                },
-                Ordering::Greater => {
-                    Ordering::Greater
-                },
-                Ordering::Equal => {
-                    a_term.cmp(&b_term)
-                },
+                Ordering::Less => Ordering::Less,
+                Ordering::Greater => Ordering::Greater,
+                Ordering::Equal => a_term.cmp(&b_term),
             }
         }
     }
 }
 
 pub enum InsertResult {
-    Success {
-        index: LogIndex,
-    },
+    Success { index: LogIndex },
 }
 
 pub enum GetResult<Snapshot, Entry> {
@@ -57,8 +49,11 @@ pub trait Log {
     fn empty() -> Self;
 
     fn commit(&mut self, index: LogIndex);
-    fn insert(&mut self, prev: LogVersion, entry: (Term, Self::Entry))
-        -> InsertResult;
+    fn insert(
+        &mut self,
+        prev: LogVersion,
+        entry: (Term, Self::Entry),
+    ) -> InsertResult;
     fn append(&mut self, term: Term, entry: Self::Entry);
 
     fn get(&self, index: LogIndex) -> GetResult<Self::Snapshot, Self::Entry>;
@@ -93,18 +88,16 @@ impl Log for TestLog {
         self.next_commit_index = (index + 1) as usize;
     }
 
-    fn insert(&mut self, prev: LogVersion, entry: (Term, usize))
-            -> InsertResult {
+    fn insert(
+        &mut self,
+        prev: LogVersion,
+        entry: (Term, usize),
+    ) -> InsertResult {
         unimplemented!()
     }
 
     fn append(&mut self, term: Term, value: usize) {
-        self.entries.push(
-            TestEntry {
-                term,
-                value,
-            }
-        );
+        self.entries.push(TestEntry { term, value });
     }
 
     fn get(&self, index: LogIndex) -> GetResult<!, usize> {
@@ -112,9 +105,9 @@ impl Log for TestLog {
     }
 
     fn version(&self) -> LogVersion {
-        self.entries.last().map(|last| {
-            ((self.entries.len() - 1) as u64, last.term)
-        })
+        self.entries
+            .last()
+            .map(|last| ((self.entries.len() - 1) as u64, last.term))
     }
 
     fn check(&self, version: LogVersion) -> CheckResult {

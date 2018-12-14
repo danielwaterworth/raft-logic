@@ -16,8 +16,6 @@ impl<X> Iterator for Singleton<X> {
 
 impl<X> Singleton<X> {
     pub fn new(x: X) -> Self {
-        Singleton {
-            value: Some(x),
-        }
+        Singleton { value: Some(x) }
     }
 }

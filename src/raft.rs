@@ -1,20 +1,15 @@
-use crate::singleton::Singleton;
 use crate::log::{
-    CheckResult,
-    Log,
-    LogIndex,
-    LogVersion,
-    Term,
+    compare_log_versions, CheckResult, Log, LogIndex, LogVersion, Term,
     TestLog,
-    compare_log_versions,
 };
+use crate::singleton::Singleton;
 
-use std::time::Duration;
+use std::cmp::{max, min, Ordering};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::hash::Hash;
-use std::cmp::{Ordering, max, min};
-use std::mem;
 use std::fmt::Debug;
+use std::hash::Hash;
+use std::mem;
+use std::time::Duration;
 
 #[derive(Clone)]
 enum FollowerState<ServerID> {
@@ -45,12 +40,8 @@ impl<ServerID: Clone> FollowerState<ServerID> {
 #[derive(Clone)]
 enum FollowerInfo {
     Unknown,
-    Tracking {
-        known_replicated: LogIndex,
-    },
-    Syncing {
-        bad_index: LogIndex,
-    },
+    Tracking { known_replicated: LogIndex },
+    Syncing { bad_index: LogIndex },
 }
 
 impl FollowerInfo {
@@ -58,10 +49,12 @@ impl FollowerInfo {
         match self {
             FollowerInfo::Tracking { known_replicated } => {
                 *known_replicated = max(*known_replicated, index);
-            },
+            }
             _ => {
-                *self = FollowerInfo::Tracking { known_replicated: index };
-            },
+                *self = FollowerInfo::Tracking {
+                    known_replicated: index,
+                };
+            }
         }
     }
 
@@ -69,11 +62,11 @@ impl FollowerInfo {
         match self {
             FollowerInfo::Unknown => {
                 *self = FollowerInfo::Syncing { bad_index: index };
-            },
+            }
             FollowerInfo::Syncing { bad_index } => {
                 *bad_index = min(*bad_index, index);
-            },
-            FollowerInfo::Tracking { .. } => {},
+            }
+            FollowerInfo::Tracking { .. } => {}
         }
     }
 }
@@ -147,7 +140,9 @@ pub enum Action<ServerID, Entry> {
     },
     SetTimeout,
     ClearTimeout,
-    Commit { entry: Entry },
+    Commit {
+        entry: Entry,
+    },
 }
 
 pub enum Operation<'a, ServerID, Entry> {
@@ -169,27 +164,17 @@ impl<'a, ServerID, Entry> Iterator for Operation<'a, ServerID, Entry> {
     fn next(&mut self) -> Option<Action<ServerID, Entry>> {
         match self {
             Operation::DoNothing => None,
-            Operation::OneAction(iter) => {
-                iter.next()
-            },
-            Operation::AcceptedClientRequest => {
-                unimplemented!()
-            },
-            Operation::LogEntryInfo => {
-                unimplemented!()
-            },
-            Operation::FreeForm(ref mut items) => {
-                items.pop_front()
-            },
+            Operation::OneAction(iter) => iter.next(),
+            Operation::AcceptedClientRequest => unimplemented!(),
+            Operation::LogEntryInfo => unimplemented!(),
+            Operation::FreeForm(ref mut items) => items.pop_front(),
             Operation::TransitionToFollower { then } => {
                 let mut tmp = do_nothing();
                 mem::swap(&mut tmp, &mut **then);
                 *self = tmp;
                 Some(Action::SetTimeout)
-            },
-            Operation::TransitionToLeader => {
-                unimplemented!()
-            },
+            }
+            Operation::TransitionToLeader => unimplemented!(),
             Operation::Phantom(_) => unreachable!(),
         }
     }
@@ -199,153 +184,128 @@ fn do_nothing<'a, ServerID, Entry>() -> Operation<'a, ServerID, Entry> {
     Operation::DoNothing
 }
 
-fn accepted_vote<'a, ServerID, Entry>(term: Term, server_id: ServerID)
-        -> Operation<'a, ServerID, Entry> {
-    Operation::OneAction(
-        Singleton::new(
-            Action::SendMessage {
-                term,
-                server_id,
-                message: Message::VoteAccepted,
-            }
-        )
-    )
+fn accepted_vote<'a, ServerID, Entry>(
+    term: Term,
+    server_id: ServerID,
+) -> Operation<'a, ServerID, Entry> {
+    Operation::OneAction(Singleton::new(Action::SendMessage {
+        term,
+        server_id,
+        message: Message::VoteAccepted,
+    }))
 }
 
-fn rejected_vote<'a, ServerID, Entry>(term: Term, server_id: ServerID)
-        -> Operation<'a, ServerID, Entry> {
-    Operation::OneAction(
-        Singleton::new(
-            Action::SendMessage {
-                term,
-                server_id,
-                message: Message::VoteRejected,
-            }
-        )
-    )
+fn rejected_vote<'a, ServerID, Entry>(
+    term: Term,
+    server_id: ServerID,
+) -> Operation<'a, ServerID, Entry> {
+    Operation::OneAction(Singleton::new(Action::SendMessage {
+        term,
+        server_id,
+        message: Message::VoteRejected,
+    }))
 }
 
-fn accepted_client_request<'a, ServerID, Entry>()
-        -> Operation<'a, ServerID, Entry> {
+fn accepted_client_request<'a, ServerID, Entry>(
+) -> Operation<'a, ServerID, Entry> {
     unimplemented!()
 }
 
 fn rejected_client_request<'a, ServerID, Entry>(
-            current_leader: Option<ServerID>,
-        ) -> Operation<'a, ServerID, Entry> {
-    Operation::OneAction(
-        Singleton::new(
-            Action::ClientRequestRejected {
-                current_leader
-            }
-        )
-    )
+    current_leader: Option<ServerID>,
+) -> Operation<'a, ServerID, Entry> {
+    Operation::OneAction(Singleton::new(Action::ClientRequestRejected {
+        current_leader,
+    }))
 }
 
 fn transition_to_follower<'a, ServerID, Entry>(
-            then: Operation<'a, ServerID, Entry>
-        ) -> Operation<'a, ServerID, Entry> {
+    then: Operation<'a, ServerID, Entry>,
+) -> Operation<'a, ServerID, Entry> {
     Operation::TransitionToFollower {
         then: Box::new(then),
     }
 }
 
 fn transition_to_candidate<'a, ServerID, Entry>(
-            term: Term,
-            servers: &HashSet<ServerID>,
-            except: &ServerID,
-            version: LogVersion,
-        ) -> Operation<'a, ServerID, Entry>
-            where
-                ServerID: Hash + Eq + Clone {
-    let mut actions: VecDeque<Action<ServerID, Entry>> =
-        servers
-            .iter()
-            .filter(|server_id| **server_id != *except)
-            .map(|server_id|
-                Action::SendMessage {
-                    server_id: server_id.clone(),
-                    term,
-                    message:
-                        Message::RequestVote {
-                            version
-                        }
-                }
-            )
-            .collect();
-    actions.push_back(
-        Action::SetTimeout,
-    );
+    term: Term,
+    servers: &HashSet<ServerID>,
+    except: &ServerID,
+    version: LogVersion,
+) -> Operation<'a, ServerID, Entry>
+where
+    ServerID: Hash + Eq + Clone,
+{
+    let mut actions: VecDeque<Action<ServerID, Entry>> = servers
+        .iter()
+        .filter(|server_id| **server_id != *except)
+        .map(|server_id| Action::SendMessage {
+            server_id: server_id.clone(),
+            term,
+            message: Message::RequestVote { version },
+        })
+        .collect();
+    actions.push_back(Action::SetTimeout);
 
     Operation::FreeForm(actions)
 }
 
 fn transition_to_leader<'a, ServerID, Entry>(
-            term: Term,
-            servers: &HashSet<ServerID>,
-            except: &ServerID,
-            version: LogVersion,
-        ) -> Operation<'a, ServerID, Entry>
-            where
-                ServerID: Hash + Eq + Clone {
-    let mut actions: VecDeque<Action<ServerID, Entry>> =
-        servers
-            .iter()
-            .filter(|server_id| *server_id != except)
-            .map(|server_id|
-                Action::SendMessage {
-                    server_id: server_id.clone(),
-                    term,
-                    message:
-                        Message::ApplyEntriesRequest {
-                            commit: None,
-                            log_version: version,
-                            entries: Vec::new(),
-                        }
-                }
-            )
-            .collect();
-    actions.push_back(
-        Action::ClearTimeout,
-    );
+    term: Term,
+    servers: &HashSet<ServerID>,
+    except: &ServerID,
+    version: LogVersion,
+) -> Operation<'a, ServerID, Entry>
+where
+    ServerID: Hash + Eq + Clone,
+{
+    let mut actions: VecDeque<Action<ServerID, Entry>> = servers
+        .iter()
+        .filter(|server_id| *server_id != except)
+        .map(|server_id| Action::SendMessage {
+            server_id: server_id.clone(),
+            term,
+            message: Message::ApplyEntriesRequest {
+                commit: None,
+                log_version: version,
+                entries: Vec::new(),
+            },
+        })
+        .collect();
+    actions.push_back(Action::ClearTimeout);
 
     Operation::FreeForm(actions)
 }
 
 fn entries_applied<'a, ServerID, Entry>(
-        term: Term,
-        leader: ServerID,
-    ) -> Operation<'a, ServerID, Entry> {
+    term: Term,
+    leader: ServerID,
+) -> Operation<'a, ServerID, Entry> {
     let mut actions: VecDeque<Action<ServerID, Entry>> = VecDeque::new();
-    actions.push_back(
-        Action::SetTimeout,
-    );
-    actions.push_back(
-        Action::SendMessage {
-            term,
-            server_id: leader,
-            message:
-                Message::LogEntryInfo {
-                    version: None,
-                },
-        },
-    );
+    actions.push_back(Action::SetTimeout);
+    actions.push_back(Action::SendMessage {
+        term,
+        server_id: leader,
+        message: Message::LogEntryInfo { version: None },
+    });
 
     Operation::FreeForm(actions)
 }
 
 fn entries_not_applied<'a, ServerID, Entry>(
-        term: Term,
-        leader: ServerID,
-    ) -> Operation<'a, ServerID, Entry> {
+    term: Term,
+    leader: ServerID,
+) -> Operation<'a, ServerID, Entry> {
     // ResetTimeout
     // Reply to leader
     unimplemented!()
 }
 
 impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
-    pub fn new(server_id: ServerID, servers: HashSet<ServerID>)
-            -> Node<ServerID, L> {
+    pub fn new(
+        server_id: ServerID,
+        servers: HashSet<ServerID>,
+    ) -> Node<ServerID, L> {
         Node {
             server_id,
             servers,
@@ -358,10 +318,9 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
     fn transition_to_candidate(&mut self) -> Operation<ServerID, L::Entry> {
         self.current_term += 1;
 
-        self.state =
-            State::Candidate {
-                votes_received: HashSet::default(),
-            };
+        self.state = State::Candidate {
+            votes_received: HashSet::default(),
+        };
 
         transition_to_candidate(
             self.current_term,
@@ -371,200 +330,153 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
         )
     }
 
-    pub fn process(&mut self, input: &Input<ServerID, L::Entry>)
-            -> Operation<ServerID, L::Entry> {
+    pub fn process(
+        &mut self,
+        input: &Input<ServerID, L::Entry>,
+    ) -> Operation<ServerID, L::Entry> {
         match input {
-            Input::OnMessage { message, term, server_id } => {
+            Input::OnMessage {
+                message,
+                term,
+                server_id,
+            } => {
                 if self.current_term > *term {
                     return do_nothing();
                 }
                 if *term > self.current_term {
                     self.current_term = *term;
-                    self.state =
-                        State::Follower(
-                            FollowerState::Oblivious
-                        );
+                    self.state = State::Follower(FollowerState::Oblivious);
                     return transition_to_follower(self.process(input));
                 }
-            },
+            }
             _ => {}
         }
 
         match &mut self.state {
-            State::Follower(follower_state) => {
-                match input {
-                    Input::ClientRequest { entry } => {
-                        rejected_client_request(
-                            follower_state.current_leader(),
-                        )
-                    },
-                    Input::OnMessage { message, term, server_id } => {
-                        match message {
-                            Message::RequestVote { version } => {
-                                let cmp =
-                                    compare_log_versions(
-                                        *version,
-                                        self.log.version(),
-                                    ) != Ordering::Less;
-
-                                if follower_state.can_vote() && cmp {
-                                    *follower_state =
-                                        FollowerState::Voted(
-                                            server_id.clone(),
-                                        );
-                                    accepted_vote(
-                                        self.current_term,
-                                        server_id.clone(),
-                                    )
-                                } else {
-                                    rejected_vote(
-                                        self.current_term,
-                                        server_id.clone(),
-                                    )
-                                }
-                            },
-                            Message::InstallSnapshot => {
-                                unimplemented!()
-                            },
-                            Message::ApplyEntriesRequest {
-                                        commit, entries, log_version
-                                    } => {
-                                *follower_state =
-                                    FollowerState::Following(
-                                        server_id.clone(),
-                                    );
-                                if self.log.version() == *log_version {
-                                    for entry in entries {
-                                        self.log.append(
-                                            entry.0,
-                                            entry.1.clone(),
-                                        );
-                                    }
-                                    entries_applied(
-                                        *term,
-                                        server_id.clone(),
-                                    )
-                                } else {
-                                    entries_not_applied(
-                                        *term,
-                                        server_id.clone(),
-                                    )
-                                }
-                            },
-                            Message::VoteAccepted | Message::VoteRejected => {
-                                do_nothing()
-                            },
-                            Message::LogEntryInfo { version } => {
-                                unreachable!("\
-                                    Cannot transition from leader to follower \
-                                    in the same term\
-                                ")
-                            },
-                        }
-                    },
-                    Input::Timeout => {
-                        self.transition_to_candidate()
-                    },
+            State::Follower(follower_state) => match input {
+                Input::ClientRequest { entry } => {
+                    rejected_client_request(follower_state.current_leader())
                 }
+                Input::OnMessage {
+                    message,
+                    term,
+                    server_id,
+                } => match message {
+                    Message::RequestVote { version } => {
+                        let cmp =
+                            compare_log_versions(*version, self.log.version())
+                                != Ordering::Less;
+
+                        if follower_state.can_vote() && cmp {
+                            *follower_state =
+                                FollowerState::Voted(server_id.clone());
+                            accepted_vote(self.current_term, server_id.clone())
+                        } else {
+                            rejected_vote(self.current_term, server_id.clone())
+                        }
+                    }
+                    Message::InstallSnapshot => unimplemented!(),
+                    Message::ApplyEntriesRequest {
+                        commit,
+                        entries,
+                        log_version,
+                    } => {
+                        *follower_state =
+                            FollowerState::Following(server_id.clone());
+                        if self.log.version() == *log_version {
+                            for entry in entries {
+                                self.log.append(entry.0, entry.1.clone());
+                            }
+                            entries_applied(*term, server_id.clone())
+                        } else {
+                            entries_not_applied(*term, server_id.clone())
+                        }
+                    }
+                    Message::VoteAccepted | Message::VoteRejected => {
+                        do_nothing()
+                    }
+                    Message::LogEntryInfo { version } => unreachable!(
+                        "Cannot transition from leader to follower in the same \
+                        term"
+                    ),
+                },
+                Input::Timeout => self.transition_to_candidate(),
             },
-            State::Candidate { votes_received } => {
-                match input {
-                    Input::ClientRequest { entry } => {
-                        rejected_client_request(None)
-                    },
-                    Input::OnMessage { message, term, server_id } => {
-                        match message {
-                            Message::RequestVote { version } => {
-                                rejected_vote(
-                                    *term,
-                                    server_id.clone(),
-                                )
-                            },
-                            Message::ApplyEntriesRequest { .. }
-                            | Message::InstallSnapshot => {
-                                self.state =
-                                    State::Follower(
-                                        FollowerState::Following(
-                                            self.server_id.clone()
-                                        )
-                                    );
+            State::Candidate { votes_received } => match input {
+                Input::ClientRequest { entry } => rejected_client_request(None),
+                Input::OnMessage {
+                    message,
+                    term,
+                    server_id,
+                } => match message {
+                    Message::RequestVote { version } => {
+                        rejected_vote(*term, server_id.clone())
+                    }
+                    Message::ApplyEntriesRequest { .. }
+                    | Message::InstallSnapshot => {
+                        self.state = State::Follower(FollowerState::Following(
+                            self.server_id.clone(),
+                        ));
 
-                                transition_to_follower(self.process(input))
-                            },
-                            Message::VoteAccepted => {
-                                votes_received.insert(server_id.clone());
-                                let num_servers = self.servers.len();
-                                let votes = votes_received.len() + 1;
-                                if votes * 2 > self.servers.len() {
-                                    self.state =
-                                        State::Leader {
-                                            follower_infos: HashMap::default(),
-                                        };
+                        transition_to_follower(self.process(input))
+                    }
+                    Message::VoteAccepted => {
+                        votes_received.insert(server_id.clone());
+                        let num_servers = self.servers.len();
+                        let votes = votes_received.len() + 1;
+                        if votes * 2 > self.servers.len() {
+                            self.state = State::Leader {
+                                follower_infos: HashMap::default(),
+                            };
 
-                                    transition_to_leader(
-                                        self.current_term,
-                                        &self.servers,
-                                        &self.server_id,
-                                        self.log.version(),
-                                    )
-                                } else {
-                                    do_nothing()
-                                }
-                            },
-                            Message::VoteRejected => {
-                                do_nothing()
-                            },
-                            Message::LogEntryInfo { version } => {
-                                unreachable!("\
-                                    Cannot transition from leader to \
-                                    candidate in the same term\
-                                ")
-                            },
+                            transition_to_leader(
+                                self.current_term,
+                                &self.servers,
+                                &self.server_id,
+                                self.log.version(),
+                            )
+                        } else {
+                            do_nothing()
                         }
-                    },
-                    Input::Timeout => {
-                        self.transition_to_candidate()
-                    },
-                }
+                    }
+                    Message::VoteRejected => do_nothing(),
+                    Message::LogEntryInfo { version } => unreachable!(
+                        "Cannot transition from leader to candidate in the \
+                         same term"
+                    ),
+                },
+                Input::Timeout => self.transition_to_candidate(),
             },
-            State::Leader { follower_infos } => {
-                match input {
-                    Input::ClientRequest { entry } => {
-                        self.log.append(self.current_term, entry.clone());
-                        accepted_client_request()
-                    },
-                    Input::OnMessage { message, term, server_id } => {
-                        match message {
-                            Message::RequestVote { version } => {
-                                rejected_vote(
-                                    *term,
-                                    server_id.clone(),
-                                )
-                            },
-                            Message::ApplyEntriesRequest { .. }
-                            | Message::InstallSnapshot => {
-                                unreachable!(
-                                    "cannot have two leaders in the same term"
-                                )
-                            },
-                            Message::VoteAccepted | Message::VoteRejected => {
-                                do_nothing()
-                            },
-                            Message::LogEntryInfo { version } => {
-                                let mut follower_info =
-                                    follower_infos
-                                        .entry(server_id.clone())
-                                        .or_insert(FollowerInfo::Unknown);
-
-                                let x = self.log.check(*version);
-                                unimplemented!()
-                            },
-                        }
-                    },
-                    Input::Timeout => {
-                        unreachable!("No timer should have been set")
-                    },
+            State::Leader { follower_infos } => match input {
+                Input::ClientRequest { entry } => {
+                    self.log.append(self.current_term, entry.clone());
+                    accepted_client_request()
                 }
+                Input::OnMessage {
+                    message,
+                    term,
+                    server_id,
+                } => match message {
+                    Message::RequestVote { version } => {
+                        rejected_vote(*term, server_id.clone())
+                    }
+                    Message::ApplyEntriesRequest { .. }
+                    | Message::InstallSnapshot => {
+                        unreachable!("cannot have two leaders in the same term")
+                    }
+                    Message::VoteAccepted | Message::VoteRejected => {
+                        do_nothing()
+                    }
+                    Message::LogEntryInfo { version } => {
+                        let mut follower_info = follower_infos
+                            .entry(server_id.clone())
+                            .or_insert(FollowerInfo::Unknown);
+
+                        let x = self.log.check(*version);
+                        unimplemented!()
+                    }
+                },
+                Input::Timeout => unreachable!("No timer should have been set"),
             },
         }
     }
@@ -577,12 +489,13 @@ mod tests {
     type TestNode = Node<&'static str, TestLog>;
 
     fn expect_actions<ServerID, L: Log>(
-                node: &mut Node<ServerID, L>,
-                input: &Input<ServerID, L::Entry>,
-                expected_actions: Vec<Action<ServerID, L::Entry>>,
-            ) where
-                ServerID: Hash + Eq + Debug + Clone,
-                L::Entry: Hash + Eq + Debug {
+        node: &mut Node<ServerID, L>,
+        input: &Input<ServerID, L::Entry>,
+        expected_actions: Vec<Action<ServerID, L::Entry>>,
+    ) where
+        ServerID: Hash + Eq + Debug + Clone,
+        L::Entry: Hash + Eq + Debug,
+    {
         let actions: HashSet<Action<ServerID, L::Entry>> =
             node.process(input).collect();
 
@@ -625,22 +538,18 @@ mod tests {
             &Input::OnMessage {
                 term: 1,
                 server_id: "b",
-                message:
-                    Message::ApplyEntriesRequest {
-                        commit: None,
-                        log_version: None,
-                        entries: Vec::new(),
-                    },
+                message: Message::ApplyEntriesRequest {
+                    commit: None,
+                    log_version: None,
+                    entries: Vec::new(),
+                },
             },
             vec![
                 Action::SetTimeout,
                 Action::SendMessage {
                     term: 1,
                     server_id: "b",
-                    message:
-                        Message::LogEntryInfo {
-                            version: None,
-                        },
+                    message: Message::LogEntryInfo { version: None },
                 },
             ],
         );
@@ -682,13 +591,11 @@ mod tests {
                 server_id: "b",
                 term: 1,
             },
-            vec![
-                Action::SendMessage {
-                    server_id: "b",
-                    term: 1,
-                    message: Message::VoteRejected,
-                },
-            ],
+            vec![Action::SendMessage {
+                server_id: "b",
+                term: 1,
+                message: Message::VoteRejected,
+            }],
         );
 
         // Our vote has been rejected
@@ -699,8 +606,7 @@ mod tests {
                 server_id: "b",
                 term: 1,
             },
-            vec![
-            ],
+            vec![],
         );
 
         // Trigger another election
@@ -736,14 +642,10 @@ mod tests {
         // We expect client requests to fail at this point
         expect_actions(
             &mut a,
-            &Input::ClientRequest {
-                entry: 1,
-            },
-            vec![
-                Action::ClientRequestRejected {
-                    current_leader: None,
-                },
-            ],
+            &Input::ClientRequest { entry: 1 },
+            vec![Action::ClientRequestRejected {
+                current_leader: None,
+            }],
         );
 
         // A timeout here should trigger an election
@@ -795,22 +697,20 @@ mod tests {
                 Action::SendMessage {
                     term: 1,
                     server_id: "b",
-                    message:
-                        Message::ApplyEntriesRequest {
-                            commit: None,
-                            log_version: None,
-                            entries: Vec::new(),
-                        },
+                    message: Message::ApplyEntriesRequest {
+                        commit: None,
+                        log_version: None,
+                        entries: Vec::new(),
+                    },
                 },
                 Action::SendMessage {
                     term: 1,
                     server_id: "c",
-                    message:
-                        Message::ApplyEntriesRequest {
-                            commit: None,
-                            log_version: None,
-                            entries: Vec::new(),
-                        },
+                    message: Message::ApplyEntriesRequest {
+                        commit: None,
+                        log_version: None,
+                        entries: Vec::new(),
+                    },
                 },
                 Action::ClearTimeout,
             ],
@@ -820,12 +720,11 @@ mod tests {
         expect_actions(
             &mut b,
             &Input::OnMessage {
-                message:
-                    Message::ApplyEntriesRequest {
-                        commit: None,
-                        log_version: None,
-                        entries: Vec::new(),
-                    },
+                message: Message::ApplyEntriesRequest {
+                    commit: None,
+                    log_version: None,
+                    entries: Vec::new(),
+                },
                 server_id: "a",
                 term: 1,
             },
@@ -834,10 +733,7 @@ mod tests {
                 Action::SendMessage {
                     term: 1,
                     server_id: "a",
-                    message:
-                        Message::LogEntryInfo {
-                            version: None,
-                        },
+                    message: Message::LogEntryInfo { version: None },
                 },
             ],
         );
@@ -846,14 +742,10 @@ mod tests {
         // request
         expect_actions(
             &mut b,
-            &Input::ClientRequest {
-                entry: 2,
-            },
-            vec![
-                Action::ClientRequestRejected {
-                    current_leader: Some("a"),
-                },
-            ],
+            &Input::ClientRequest { entry: 2 },
+            vec![Action::ClientRequestRejected {
+                current_leader: Some("a"),
+            }],
         );
 
         // Working up to here
@@ -865,33 +757,24 @@ mod tests {
             &Input::OnMessage {
                 server_id: "b",
                 term: 1,
-                message:
-                    Message::LogEntryInfo {
-                        version: None,
-                    },
+                message: Message::LogEntryInfo { version: None },
             },
-            vec![
-            ],
+            vec![],
         );
 
         // Having established leadership, let's publish a message
         expect_actions(
             &mut a,
-            &Input::ClientRequest {
-                entry: 3,
-            },
-            vec![
-                Action::SendMessage {
-                    term: 1,
-                    server_id: "b",
-                    message:
-                        Message::ApplyEntriesRequest {
-                            commit: None,
-                            log_version: None,
-                            entries: vec![(1, 3)],
-                        },
+            &Input::ClientRequest { entry: 3 },
+            vec![Action::SendMessage {
+                term: 1,
+                server_id: "b",
+                message: Message::ApplyEntriesRequest {
+                    commit: None,
+                    log_version: None,
+                    entries: vec![(1, 3)],
                 },
-            ],
+            }],
         );
 
         // Let's pass on the message to b
@@ -900,21 +783,17 @@ mod tests {
             &Input::OnMessage {
                 term: 1,
                 server_id: "a",
-                message:
-                    Message::ApplyEntriesRequest {
-                        commit: None,
-                        log_version: None,
-                        entries: vec![(1, 3)],
-                    },
+                message: Message::ApplyEntriesRequest {
+                    commit: None,
+                    log_version: None,
+                    entries: vec![(1, 3)],
+                },
             },
             vec![
                 Action::SendMessage {
                     term: 1,
                     server_id: "a",
-                    message:
-                        Message::LogEntryInfo {
-                            version: None,
-                        },
+                    message: Message::LogEntryInfo { version: None },
                 },
                 Action::SetTimeout,
             ],

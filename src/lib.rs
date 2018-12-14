@@ -3,5 +3,5 @@
 mod singleton;
 
 pub mod log;
-pub mod world;
 pub mod raft;
+pub mod world;

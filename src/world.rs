@@ -1,5 +1,5 @@
-use crate::raft::*;
 use crate::log::*;
+use crate::raft::*;
 use std::collections::HashSet;
 
 #[derive(Clone)]
@@ -52,26 +52,25 @@ impl World {
             match action {
                 Action::ClearTimeout => {
                     self.timers[i] = false;
-                },
+                }
                 Action::SetTimeout => {
                     self.timers[i] = true;
-                },
-                Action::SendMessage { message, server_id, term } => {
-                    self.messages.push(
-                        InFlightMessage {
-                            to: server_id,
-                            from: i as u8,
-                            message,
-                            term,
-                        }
-                    );
-                },
-                Action::AckClientRequest { .. } => {
-                },
-                Action::ClientRequestRejected { .. } => {
-                },
-                Action::Commit { .. } => {
-                },
+                }
+                Action::SendMessage {
+                    message,
+                    server_id,
+                    term,
+                } => {
+                    self.messages.push(InFlightMessage {
+                        to: server_id,
+                        from: i as u8,
+                        message,
+                        term,
+                    });
+                }
+                Action::AckClientRequest { .. } => {}
+                Action::ClientRequestRejected { .. } => {}
+                Action::Commit { .. } => {}
             }
         }
     }
@@ -105,12 +104,7 @@ impl World {
         for i in 0..3 {
             let mut option = self.clone();
             let entry = option.new_message();
-            option.process(
-                i,
-                &Input::ClientRequest {
-                    entry,
-                },
-            );
+            option.process(i, &Input::ClientRequest { entry });
             output.push(option);
         }
 
