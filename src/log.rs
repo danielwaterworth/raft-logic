@@ -35,10 +35,35 @@ pub enum GetResult<Snapshot, Entry> {
     Fail,
 }
 
-pub enum CheckResult {
-    Good(LogIndex),
-    Bad(LogIndex),
+#[derive(Clone, PartialEq, Eq)]
+pub enum LogStatus {
     Unknown,
+    Bad(LogIndex),
+    Good(LogIndex),
+    UpToDate,
+}
+
+impl PartialOrd for LogStatus {
+    fn partial_cmp(&self, other: &LogStatus) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for LogStatus {
+    fn cmp(&self, other: &LogStatus) -> Ordering {
+        match (self, other) {
+            (LogStatus::Unknown, LogStatus::Unknown) => Ordering::Equal,
+            (LogStatus::Unknown, _) => Ordering::Less,
+            (_, LogStatus::Unknown) => Ordering::Greater,
+            (LogStatus::Bad(a), LogStatus::Bad(b)) => b.cmp(a),
+            (LogStatus::Bad(_), _) => Ordering::Less,
+            (_, LogStatus::Bad(_)) => Ordering::Greater,
+            (LogStatus::Good(a), LogStatus::Good(b)) => a.cmp(b),
+            (LogStatus::Good(_), _) => Ordering::Less,
+            (_, LogStatus::Good(_)) => Ordering::Greater,
+            (LogStatus::UpToDate, LogStatus::UpToDate) => Ordering::Equal,
+        }
+    }
 }
 
 pub trait Log {
@@ -57,7 +82,7 @@ pub trait Log {
 
     fn get(&self, index: LogIndex) -> GetResult<Self::Snapshot, Self::Entry>;
     fn version(&self) -> LogVersion;
-    fn check(&self, version: LogVersion) -> CheckResult;
+    fn check(&self, index: LogIndex, term: Term) -> LogStatus;
 }
 
 #[derive(Clone)]
@@ -109,7 +134,7 @@ impl Log for TestLog {
             .map(|last| ((self.entries.len() - 1) as u64, last.term))
     }
 
-    fn check(&self, version: LogVersion) -> CheckResult {
+    fn check(&self, index: LogIndex, term: Term) -> LogStatus {
         unimplemented!()
     }
 }

@@ -1,9 +1,9 @@
 use crate::log::{
-    compare_log_versions, CheckResult, Log, LogIndex, LogVersion, Term,
+    compare_log_versions, Log, LogIndex, LogStatus, LogVersion, Term,
 };
 use crate::singleton::Singleton;
 
-use std::cmp::{max, min, Ordering};
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hash;
 use std::mem;
@@ -33,41 +33,6 @@ impl<ServerID: Clone> FollowerState<ServerID> {
     }
 }
 
-// This is the information a leader stores about a follower
-#[derive(Clone)]
-enum FollowerInfo {
-    Unknown,
-    Tracking { known_replicated: LogIndex },
-    Syncing { bad_index: LogIndex },
-}
-
-impl FollowerInfo {
-    fn good(&mut self, index: LogIndex) {
-        match self {
-            FollowerInfo::Tracking { known_replicated } => {
-                *known_replicated = max(*known_replicated, index);
-            }
-            _ => {
-                *self = FollowerInfo::Tracking {
-                    known_replicated: index,
-                };
-            }
-        }
-    }
-
-    fn bad(&mut self, index: LogIndex) {
-        match self {
-            FollowerInfo::Unknown => {
-                *self = FollowerInfo::Syncing { bad_index: index };
-            }
-            FollowerInfo::Syncing { bad_index } => {
-                *bad_index = min(*bad_index, index);
-            }
-            FollowerInfo::Tracking { .. } => {}
-        }
-    }
-}
-
 #[derive(Clone)]
 enum State<ServerID> {
     Follower(FollowerState<ServerID>),
@@ -75,7 +40,7 @@ enum State<ServerID> {
         votes_received: HashSet<ServerID>,
     },
     Leader {
-        follower_infos: HashMap<ServerID, FollowerInfo>,
+        follower_infos: HashMap<ServerID, LogStatus>,
     },
 }
 
@@ -104,10 +69,10 @@ pub enum Message<Entry> {
     VoteAccepted,
     VoteRejected,
 
-    // Response to ApplyEntriesRequest, says that version is a log entry in
-    // the server's log
+    // Response to ApplyEntriesRequest, says that `index` is from `term`
     LogEntryInfo {
-        version: LogVersion,
+        index: LogIndex,
+        term: Term,
     },
 }
 
@@ -204,7 +169,14 @@ fn rejected_vote<'a, ServerID, Entry>(
 }
 
 fn accepted_client_request<'a, ServerID, Entry>(
-) -> Operation<'a, ServerID, Entry> {
+    follower_infos: &HashMap<ServerID, LogStatus>,
+    current_term: Term,
+    entry: Entry,
+) -> Operation<'a, ServerID, Entry>
+where
+    ServerID: Eq + Hash,
+{
+    for (server_id, follower_info) in follower_infos.iter() {}
     unimplemented!()
 }
 
@@ -275,16 +247,23 @@ where
 }
 
 fn entries_applied<'a, ServerID, Entry>(
-    term: Term,
+    current_term: Term,
     leader: ServerID,
+    version: LogVersion,
 ) -> Operation<'a, ServerID, Entry> {
     let mut actions: VecDeque<Action<ServerID, Entry>> = VecDeque::new();
     actions.push_back(Action::SetTimeout);
-    actions.push_back(Action::SendMessage {
-        term,
-        server_id: leader,
-        message: Message::LogEntryInfo { version: None },
-    });
+
+    if let Some((index, entry_term)) = version {
+        actions.push_back(Action::SendMessage {
+            term: current_term,
+            server_id: leader,
+            message: Message::LogEntryInfo {
+                index,
+                term: entry_term,
+            },
+        });
+    }
 
     Operation::FreeForm(actions)
 }
@@ -331,11 +310,7 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
         &mut self,
         input: &Input<ServerID, L::Entry>,
     ) -> Operation<ServerID, L::Entry> {
-        if let Input::OnMessage {
-            term,
-            ..
-        } = input
-        {
+        if let Input::OnMessage { term, .. } = input {
             if self.current_term > *term {
                 return do_nothing();
             }
@@ -381,7 +356,11 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
                             for entry in entries {
                                 self.log.append(entry.0, entry.1.clone());
                             }
-                            entries_applied(*term, server_id.clone())
+                            entries_applied(
+                                *term,
+                                server_id.clone(),
+                                self.log.version(),
+                            )
                         } else {
                             entries_not_applied(*term, server_id.clone())
                         }
@@ -444,7 +423,11 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
             State::Leader { follower_infos } => match input {
                 Input::ClientRequest { entry } => {
                     self.log.append(self.current_term, entry.clone());
-                    accepted_client_request()
+                    accepted_client_request(
+                        &follower_infos,
+                        self.current_term,
+                        entry.clone(),
+                    )
                 }
                 Input::OnMessage {
                     message,
@@ -461,13 +444,32 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
                     Message::VoteAccepted | Message::VoteRejected => {
                         do_nothing()
                     }
-                    Message::LogEntryInfo { version } => {
-                        let _follower_info = follower_infos
+                    Message::LogEntryInfo { index, term } => {
+                        let follower_info = follower_infos
                             .entry(server_id.clone())
-                            .or_insert(FollowerInfo::Unknown);
+                            .or_insert(LogStatus::Unknown);
 
-                        let _x = self.log.check(*version);
-                        unimplemented!()
+                        let x = self.log.check(*index, *term);
+                        if x > *follower_info {
+                            *follower_info = x;
+                            match follower_info {
+                                LogStatus::Unknown => unreachable!(),
+                                LogStatus::Bad(index) => {
+                                    // send an empty append entries for index-1
+                                    unimplemented!()
+                                }
+                                LogStatus::Good(index) => {
+                                    // send all entries from index + 1 to latest
+                                    unimplemented!()
+                                }
+                                LogStatus::UpToDate => do_nothing(),
+                            }
+                        } else if let LogStatus::Unknown = x {
+                            unimplemented!("send snapshot")
+                        } else {
+                            // We received a duplicate response
+                            do_nothing()
+                        }
                     }
                 },
                 Input::Timeout => {
@@ -480,8 +482,8 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
 
 #[cfg(test)]
 mod tests {
-    use std::fmt::Debug;
     use crate::log::TestLog;
+    use std::fmt::Debug;
 
     use super::*;
 
@@ -543,14 +545,7 @@ mod tests {
                     entries: Vec::new(),
                 },
             },
-            vec![
-                Action::SetTimeout,
-                Action::SendMessage {
-                    term: 1,
-                    server_id: "b",
-                    message: Message::LogEntryInfo { version: None },
-                },
-            ],
+            vec![Action::SetTimeout],
         );
     }
 
@@ -727,14 +722,7 @@ mod tests {
                 server_id: "a",
                 term: 1,
             },
-            vec![
-                Action::SetTimeout,
-                Action::SendMessage {
-                    term: 1,
-                    server_id: "a",
-                    message: Message::LogEntryInfo { version: None },
-                },
-            ],
+            vec![Action::SetTimeout],
         );
 
         // b should now consider a the leader, let's check with a client
@@ -749,17 +737,6 @@ mod tests {
 
         // Working up to here
         return;
-
-        // Let's pass the entries-applied message back to a
-        expect_actions(
-            &mut a,
-            &Input::OnMessage {
-                server_id: "b",
-                term: 1,
-                message: Message::LogEntryInfo { version: None },
-            },
-            vec![],
-        );
 
         // Having established leadership, let's publish a message
         expect_actions(
@@ -792,7 +769,7 @@ mod tests {
                 Action::SendMessage {
                     term: 1,
                     server_id: "a",
-                    message: Message::LogEntryInfo { version: None },
+                    message: Message::LogEntryInfo { index: 0, term: 1 },
                 },
                 Action::SetTimeout,
             ],
