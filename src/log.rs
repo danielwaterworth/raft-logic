@@ -1,5 +1,4 @@
 use std::cmp::Ordering;
-use std::collections::VecDeque;
 
 pub type Term = u64;
 pub type LogIndex = u64;

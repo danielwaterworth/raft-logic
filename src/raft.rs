@@ -1,15 +1,12 @@
 use crate::log::{
     compare_log_versions, CheckResult, Log, LogIndex, LogVersion, Term,
-    TestLog,
 };
 use crate::singleton::Singleton;
 
 use std::cmp::{max, min, Ordering};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fmt::Debug;
 use std::hash::Hash;
 use std::mem;
-use std::time::Duration;
 
 #[derive(Clone)]
 enum FollowerState<ServerID> {
@@ -219,9 +216,9 @@ fn rejected_client_request<'a, ServerID, Entry>(
     }))
 }
 
-fn transition_to_follower<'a, ServerID, Entry>(
-    then: Operation<'a, ServerID, Entry>,
-) -> Operation<'a, ServerID, Entry> {
+fn transition_to_follower<ServerID, Entry>(
+    then: Operation<ServerID, Entry>,
+) -> Operation<ServerID, Entry> {
     Operation::TransitionToFollower {
         then: Box::new(then),
     }
@@ -334,27 +331,24 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
         &mut self,
         input: &Input<ServerID, L::Entry>,
     ) -> Operation<ServerID, L::Entry> {
-        match input {
-            Input::OnMessage {
-                message,
-                term,
-                server_id,
-            } => {
-                if self.current_term > *term {
-                    return do_nothing();
-                }
-                if *term > self.current_term {
-                    self.current_term = *term;
-                    self.state = State::Follower(FollowerState::Oblivious);
-                    return transition_to_follower(self.process(input));
-                }
+        if let Input::OnMessage {
+            term,
+            ..
+        } = input
+        {
+            if self.current_term > *term {
+                return do_nothing();
             }
-            _ => {}
+            if *term > self.current_term {
+                self.current_term = *term;
+                self.state = State::Follower(FollowerState::Oblivious);
+                return transition_to_follower(self.process(input));
+            }
         }
 
         match &mut self.state {
             State::Follower(follower_state) => match input {
-                Input::ClientRequest { entry } => {
+                Input::ClientRequest { .. } => {
                     rejected_client_request(follower_state.current_leader())
                 }
                 Input::OnMessage {
@@ -395,28 +389,28 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
                     Message::VoteAccepted | Message::VoteRejected => {
                         do_nothing()
                     }
-                    Message::LogEntryInfo { version } => unreachable!(
-                        "Cannot transition from leader to follower in the same \
-                        term"
+                    Message::LogEntryInfo { .. } => unreachable!(
+                        "Cannot transition from leader to follower in the \
+                         same term"
                     ),
                 },
                 Input::Timeout => self.transition_to_candidate(),
             },
             State::Candidate { votes_received } => match input {
-                Input::ClientRequest { entry } => rejected_client_request(None),
+                Input::ClientRequest { .. } => rejected_client_request(None),
                 Input::OnMessage {
                     message,
                     term,
                     server_id,
                 } => match message {
-                    Message::RequestVote { version } => {
+                    Message::RequestVote { .. } => {
                         rejected_vote(*term, server_id.clone())
                     }
                     Message::ApplyEntriesRequest { .. }
                     | Message::InstallSnapshot => {
-                        self.state = State::Follower(FollowerState::Following(
-                            self.server_id.clone(),
-                        ));
+                        self.state = State::Follower(
+                            FollowerState::Following(self.server_id.clone()),
+                        );
 
                         transition_to_follower(self.process(input))
                     }
@@ -424,7 +418,7 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
                         votes_received.insert(server_id.clone());
                         let num_servers = self.servers.len();
                         let votes = votes_received.len() + 1;
-                        if votes * 2 > self.servers.len() {
+                        if votes * 2 > num_servers {
                             self.state = State::Leader {
                                 follower_infos: HashMap::default(),
                             };
@@ -440,7 +434,7 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
                         }
                     }
                     Message::VoteRejected => do_nothing(),
-                    Message::LogEntryInfo { version } => unreachable!(
+                    Message::LogEntryInfo { .. } => unreachable!(
                         "Cannot transition from leader to candidate in the \
                          same term"
                     ),
@@ -457,26 +451,28 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
                     term,
                     server_id,
                 } => match message {
-                    Message::RequestVote { version } => {
+                    Message::RequestVote { .. } => {
                         rejected_vote(*term, server_id.clone())
                     }
                     Message::ApplyEntriesRequest { .. }
-                    | Message::InstallSnapshot => {
-                        unreachable!("cannot have two leaders in the same term")
-                    }
+                    | Message::InstallSnapshot => unreachable!(
+                        "cannot have two leaders in the same term"
+                    ),
                     Message::VoteAccepted | Message::VoteRejected => {
                         do_nothing()
                     }
                     Message::LogEntryInfo { version } => {
-                        let mut follower_info = follower_infos
+                        let _follower_info = follower_infos
                             .entry(server_id.clone())
                             .or_insert(FollowerInfo::Unknown);
 
-                        let x = self.log.check(*version);
+                        let _x = self.log.check(*version);
                         unimplemented!()
                     }
                 },
-                Input::Timeout => unreachable!("No timer should have been set"),
+                Input::Timeout => {
+                    unreachable!("No timer should have been set")
+                }
             },
         }
     }
@@ -484,6 +480,9 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Debug;
+    use crate::log::TestLog;
+
     use super::*;
 
     type TestNode = Node<&'static str, TestLog>;
