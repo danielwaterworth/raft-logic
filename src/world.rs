@@ -2,8 +2,8 @@ use crate::log::*;
 use crate::raft::*;
 use std::collections::HashSet;
 
-#[derive(Clone)]
-struct InFlightMessage {
+#[derive(Clone, Debug)]
+pub struct InFlightMessage {
     to: u8,
     from: u8,
     term: Term,
@@ -16,6 +16,13 @@ pub struct World {
     timers: [bool; 3],
     messages: Vec<InFlightMessage>,
     message_counter: usize,
+}
+
+#[derive(Clone, Debug)]
+pub enum WorldUpdate {
+    Timeout(u8),
+    Deliver(usize, InFlightMessage),
+    ClientRequest(u8),
 }
 
 impl World {
@@ -75,37 +82,45 @@ impl World {
         }
     }
 
-    pub fn options(&self) -> Vec<Self> {
+    pub fn apply(&mut self, update: WorldUpdate) {
+        match update {
+            WorldUpdate::Timeout(i) => {
+                self.process(i as usize, &Input::Timeout);
+            }
+            WorldUpdate::Deliver(i, _) => {
+                let msg = self.messages.remove(i);
+                self.process(
+                    msg.to as usize,
+                    &Input::OnMessage {
+                        server_id: msg.from,
+                        message: msg.message.clone(),
+                        term: msg.term,
+                    },
+                );
+            }
+            WorldUpdate::ClientRequest(i) => {
+                let entry = self.new_message();
+                self.process(i as usize, &Input::ClientRequest { entry });
+            }
+        }
+    }
+
+    pub fn options(&self) -> Vec<WorldUpdate> {
         let mut output = Vec::new();
 
         for i in 0..3 {
             if self.timers[i] {
-                let mut option = self.clone();
-                option.timers[i] = false;
-                option.process(i, &Input::Timeout);
-                output.push(option);
+                output.push(WorldUpdate::Timeout(i as u8));
             }
         }
 
         for i in 0..self.messages.len() {
-            let mut option = self.clone();
-            let msg = option.messages.remove(i);
-            option.process(
-                msg.to as usize,
-                &Input::OnMessage {
-                    server_id: msg.from,
-                    message: msg.message,
-                    term: msg.term,
-                },
-            );
-            output.push(option);
+            let msg = self.messages.get(i).unwrap().clone();
+            output.push(WorldUpdate::Deliver(i, msg));
         }
 
         for i in 0..3 {
-            let mut option = self.clone();
-            let entry = option.new_message();
-            option.process(i, &Input::ClientRequest { entry });
-            output.push(option);
+            output.push(WorldUpdate::ClientRequest(i as u8));
         }
 
         output

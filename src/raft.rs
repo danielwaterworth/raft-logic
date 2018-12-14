@@ -817,5 +817,27 @@ mod tests {
                 Action::SetTimeout,
             ],
         );
+
+        // Passing the response back to a, it should be committed
+        expect_actions(
+            &mut b,
+            &Input::OnMessage {
+                term: 1,
+                server_id: "a",
+                message: Message::ApplyEntriesRequest {
+                    commit: None,
+                    log_version: None,
+                    entries: vec![(1, 3)],
+                },
+            },
+            vec![
+                Action::SendMessage {
+                    term: 1,
+                    server_id: "a",
+                    message: Message::LogEntryInfo { index: 0, term: 1 },
+                },
+                Action::SetTimeout,
+            ],
+        );
     }
 }

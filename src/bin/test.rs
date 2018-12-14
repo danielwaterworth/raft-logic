@@ -1,15 +1,38 @@
-use raft::world::World;
+use raft::world::{World, WorldUpdate};
+use std::panic;
 
-fn simulate(world: World, depth: usize) {
+fn simulate(
+    trace: &mut Vec<WorldUpdate>,
+    world: World,
+    depth: usize,
+) -> Result<(), Vec<WorldUpdate>> {
     if depth == 0 {
-        return;
+        return Ok(());
     }
 
     for option in world.options() {
-        simulate(option, depth - 1);
+        trace.push(option.clone());
+        let mut new_world = world.clone();
+        let result = panic::catch_unwind(move || {
+            new_world.apply(option);
+            new_world
+        });
+        match result {
+            Err(_) => {
+                return Err(trace.clone());
+            }
+            Ok(new_world) => {
+                simulate(trace, new_world, depth - 1)?;
+                trace.pop();
+            }
+        }
     }
+
+    Ok(())
 }
 
 fn main() {
-    simulate(World::initial(), 4);
+    let mut trace = Vec::new();
+    let output = simulate(&mut trace, World::initial(), 6);
+    println!("{:#?}", output);
 }
