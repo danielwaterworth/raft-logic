@@ -169,15 +169,32 @@ fn rejected_vote<'a, ServerID, Entry>(
 }
 
 fn accepted_client_request<'a, ServerID, Entry>(
-    follower_infos: &HashMap<ServerID, LogStatus>,
+    follower_infos: &mut HashMap<ServerID, LogStatus>,
+    index: LogIndex,
     current_term: Term,
     entry: Entry,
 ) -> Operation<'a, ServerID, Entry>
 where
-    ServerID: Eq + Hash,
+    ServerID: Eq + Hash + Clone,
+    Entry: Clone,
 {
-    for (server_id, follower_info) in follower_infos.iter() {}
-    unimplemented!()
+    let mut actions: VecDeque<Action<ServerID, Entry>> = VecDeque::new();
+    for (server_id, follower_info) in follower_infos.iter_mut() {
+        if let LogStatus::UpToDate = follower_info {
+            *follower_info = LogStatus::Good(index);
+            actions.push_back(Action::SendMessage {
+                term: current_term,
+                server_id: server_id.clone(),
+                message: Message::ApplyEntriesRequest {
+                    commit: None,
+                    log_version: None,
+                    entries: vec![(index, entry.clone())],
+                },
+            });
+        }
+    }
+
+    Operation::FreeForm(actions)
 }
 
 fn rejected_client_request<'a, ServerID, Entry>(
@@ -398,9 +415,24 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
                         let num_servers = self.servers.len();
                         let votes = votes_received.len() + 1;
                         if votes * 2 > num_servers {
-                            self.state = State::Leader {
-                                follower_infos: HashMap::default(),
+                            let value = if self.log.version().is_some() {
+                                LogStatus::Unknown
+                            } else {
+                                LogStatus::UpToDate
                             };
+
+                            let follower_infos = self
+                                .servers
+                                .iter()
+                                .filter(|server_id| {
+                                    **server_id != self.server_id
+                                })
+                                .map(|server_id| {
+                                    (server_id.clone(), value.clone())
+                                })
+                                .collect();
+
+                            self.state = State::Leader { follower_infos };
 
                             transition_to_leader(
                                 self.current_term,
@@ -422,9 +454,12 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
             },
             State::Leader { follower_infos } => match input {
                 Input::ClientRequest { entry } => {
-                    self.log.append(self.current_term, entry.clone());
+                    let index =
+                        self.log.append(self.current_term, entry.clone());
+
                     accepted_client_request(
-                        &follower_infos,
+                        follower_infos,
+                        index,
                         self.current_term,
                         entry.clone(),
                     )
@@ -735,22 +770,30 @@ mod tests {
             }],
         );
 
-        // Working up to here
-        return;
-
         // Having established leadership, let's publish a message
         expect_actions(
             &mut a,
             &Input::ClientRequest { entry: 3 },
-            vec![Action::SendMessage {
-                term: 1,
-                server_id: "b",
-                message: Message::ApplyEntriesRequest {
-                    commit: None,
-                    log_version: None,
-                    entries: vec![(1, 3)],
+            vec![
+                Action::SendMessage {
+                    term: 1,
+                    server_id: "c",
+                    message: Message::ApplyEntriesRequest {
+                        commit: None,
+                        log_version: None,
+                        entries: vec![(0, 3)],
+                    },
                 },
-            }],
+                Action::SendMessage {
+                    term: 1,
+                    server_id: "b",
+                    message: Message::ApplyEntriesRequest {
+                        commit: None,
+                        log_version: None,
+                        entries: vec![(0, 3)],
+                    },
+                },
+            ],
         );
 
         // Let's pass on the message to b

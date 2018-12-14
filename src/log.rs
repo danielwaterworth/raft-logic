@@ -35,7 +35,7 @@ pub enum GetResult<Snapshot, Entry> {
     Fail,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum LogStatus {
     Unknown,
     Bad(LogIndex),
@@ -78,7 +78,7 @@ pub trait Log {
         prev: LogVersion,
         entry: (Term, Self::Entry),
     ) -> InsertResult;
-    fn append(&mut self, term: Term, entry: Self::Entry);
+    fn append(&mut self, term: Term, entry: Self::Entry) -> LogIndex;
 
     fn get(&self, index: LogIndex) -> GetResult<Self::Snapshot, Self::Entry>;
     fn version(&self) -> LogVersion;
@@ -120,8 +120,10 @@ impl Log for TestLog {
         unimplemented!()
     }
 
-    fn append(&mut self, term: Term, value: usize) {
+    fn append(&mut self, term: Term, value: usize) -> LogIndex {
+        let index = self.entries.len() as LogIndex;
         self.entries.push(TestEntry { term, value });
+        index
     }
 
     fn get(&self, index: LogIndex) -> GetResult<!, usize> {
