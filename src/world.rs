@@ -21,7 +21,7 @@ pub struct World {
 #[derive(Clone, Debug)]
 pub enum WorldUpdate {
     Timeout(u8),
-    Deliver(usize, InFlightMessage),
+    Deliver(usize, Option<InFlightMessage>),
     ClientRequest(u8),
 }
 
@@ -116,7 +116,7 @@ impl World {
 
         for i in 0..self.messages.len() {
             let msg = self.messages.get(i).unwrap().clone();
-            output.push(WorldUpdate::Deliver(i, msg));
+            output.push(WorldUpdate::Deliver(i, Some(msg)));
         }
 
         for i in 0..3 {
