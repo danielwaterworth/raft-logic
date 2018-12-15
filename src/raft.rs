@@ -263,6 +263,10 @@ where
     Operation::FreeForm(actions)
 }
 
+fn clear_timer<'a, ServerID, Entry>() -> Operation<'a, ServerID, Entry> {
+    Operation::OneAction(Singleton::new(Action::ClearTimeout))
+}
+
 fn entries_applied<'a, ServerID, Entry>(
     current_term: Term,
     leader: ServerID,
@@ -288,11 +292,14 @@ fn entries_applied<'a, ServerID, Entry>(
 fn entries_not_applied<'a, ServerID, Entry>(
     term: Term,
     leader: ServerID,
+    version: LogVersion,
 ) -> Operation<'a, ServerID, Entry> {
     // ResetTimeout
     // Reply to leader
     unimplemented!()
 }
+
+fn check_log<L: Log>(l: &mut L) {}
 
 impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
     pub fn new(
@@ -369,17 +376,19 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
                     } => {
                         *follower_state =
                             FollowerState::Following(server_id.clone());
-                        if self.log.version() == *log_version {
-                            for entry in entries {
-                                self.log.append(entry.0, entry.1.clone());
-                            }
-                            entries_applied(
+
+                        let result = self.log.insert(*log_version, &entries);
+                        match result {
+                            Ok(version) => entries_applied(
                                 *term,
                                 server_id.clone(),
-                                self.log.version(),
-                            )
-                        } else {
-                            entries_not_applied(*term, server_id.clone())
+                                version,
+                            ),
+                            Err(version) => entries_not_applied(
+                                *term,
+                                server_id.clone(),
+                                version,
+                            ),
                         }
                     }
                     Message::VoteAccepted | Message::VoteRejected => {
@@ -415,7 +424,8 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
                         let num_servers = self.servers.len();
                         let votes = votes_received.len() + 1;
                         if votes * 2 > num_servers {
-                            let value = if self.log.version().is_some() {
+                            let should_sync = self.log.version().is_some();
+                            let value = if should_sync {
                                 LogStatus::Unknown
                             } else {
                                 LogStatus::UpToDate
@@ -434,12 +444,16 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
 
                             self.state = State::Leader { follower_infos };
 
-                            transition_to_leader(
-                                self.current_term,
-                                &self.servers,
-                                &self.server_id,
-                                self.log.version(),
-                            )
+                            if should_sync {
+                                transition_to_leader(
+                                    self.current_term,
+                                    &self.servers,
+                                    &self.server_id,
+                                    self.log.version(),
+                                )
+                            } else {
+                                clear_timer()
+                            }
                         } else {
                             do_nothing()
                         }
@@ -494,7 +508,8 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
                                     unimplemented!()
                                 }
                                 LogStatus::Good(index) => {
-                                    // send all entries from index + 1 to latest
+                                    // send all entries from index + 1 to
+                                    // latest
                                     unimplemented!()
                                 }
                                 LogStatus::UpToDate => do_nothing(),

@@ -19,9 +19,7 @@ pub fn compare_log_versions(a: LogVersion, b: LogVersion) -> Ordering {
     }
 }
 
-pub enum InsertResult {
-    Success { index: LogIndex },
-}
+pub type InsertResult = Result<LogVersion, LogVersion>;
 
 pub enum GetResult<Snapshot, Entry> {
     Entry {
@@ -73,10 +71,15 @@ pub trait Log {
     fn empty() -> Self;
 
     fn commit(&mut self, index: LogIndex);
+    fn insert_entry(
+        &mut self,
+        prev: LogVersion,
+        entriy: (Term, Self::Entry),
+    ) -> InsertResult;
     fn insert(
         &mut self,
         prev: LogVersion,
-        entry: (Term, Self::Entry),
+        entries: &[(Term, Self::Entry)],
     ) -> InsertResult;
     fn append(&mut self, term: Term, entry: Self::Entry) -> LogIndex;
 
@@ -112,10 +115,18 @@ impl Log for TestLog {
         self.next_commit_index = (index + 1) as usize;
     }
 
-    fn insert(
+    fn insert_entry(
         &mut self,
         prev: LogVersion,
         entry: (Term, usize),
+    ) -> InsertResult {
+        unimplemented!()
+    }
+
+    fn insert(
+        &mut self,
+        prev: LogVersion,
+        entry: &[(Term, usize)],
     ) -> InsertResult {
         unimplemented!()
     }
