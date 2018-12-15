@@ -39,7 +39,9 @@ pub enum GetResult<Snapshot, Entry> {
 pub enum LogStatus {
     Unknown,
     Bad(LogIndex),
-    Good(LogIndex),
+    Good {
+        next: LogIndex,
+    },
     UpToDate,
 }
 
@@ -58,9 +60,10 @@ impl Ord for LogStatus {
             (LogStatus::Bad(a), LogStatus::Bad(b)) => b.cmp(a),
             (LogStatus::Bad(_), _) => Ordering::Less,
             (_, LogStatus::Bad(_)) => Ordering::Greater,
-            (LogStatus::Good(a), LogStatus::Good(b)) => a.cmp(b),
-            (LogStatus::Good(_), _) => Ordering::Less,
-            (_, LogStatus::Good(_)) => Ordering::Greater,
+            (LogStatus::Good { next: a }, LogStatus::Good { next: b }) =>
+                a.cmp(b),
+            (LogStatus::Good { .. }, _) => Ordering::Less,
+            (_, LogStatus::Good { .. }) => Ordering::Greater,
             (LogStatus::UpToDate, LogStatus::UpToDate) => Ordering::Equal,
         }
     }
@@ -84,6 +87,7 @@ pub trait Log {
     fn append(&mut self, term: Term, entry: Self::Entry) -> LogIndex;
     fn get(&self, index: LogIndex) -> GetResult<Self::Snapshot, Self::Entry>;
     fn check(&self, index: LogIndex, term: Term) -> LogStatus;
+    fn term_of(&self, index: LogIndex) -> Option<Term>;
 
     // Used during elections
     fn version(&self) -> LogVersion;
@@ -161,7 +165,20 @@ impl Log for TestLog {
     }
 
     fn get(&self, index: LogIndex) -> GetResult<!, usize> {
-        unimplemented!()
+        if (index as usize) <= self.entries.len() {
+            GetResult::Entries(
+                self.entries[index as usize..]
+                    .iter()
+                    .map(|entry| (entry.term, entry.value))
+                    .collect(),
+            )
+        } else {
+            GetResult::Fail
+        }
+    }
+
+    fn term_of(&self, index: LogIndex) -> Option<Term> {
+        self.entries.get(index as usize).map(|entry| entry.term)
     }
 
     fn version(&self) -> LogVersion {
@@ -178,7 +195,7 @@ impl Log for TestLog {
                     if index as usize == self.entries.len() - 1 {
                         LogStatus::UpToDate
                     } else {
-                        LogStatus::Good(index)
+                        LogStatus::Good { next: index + 1 }
                     }
                 } else {
                     LogStatus::Bad(index)

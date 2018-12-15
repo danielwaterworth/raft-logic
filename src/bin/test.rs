@@ -32,23 +32,30 @@ fn simulate(
 }
 
 fn main() {
-    // Interesting scenarios tend to start by electing a leader and publishing
-    // a client request, so lets do that before the search
-    let mut trace =
-        vec![
-            WorldUpdate::Timeout(0),
-            WorldUpdate::Deliver(0, None), // RequestVote
-            WorldUpdate::Deliver(1, None), // AcceptVote
-            WorldUpdate::ClientRequest(0),
-        ];
+    // Its easier to find bugs with some setup
+    let mut trace = vec![
+        // Make 0 leader in term 1
+        WorldUpdate::Timeout(0),
+        WorldUpdate::Deliver(0, None), // RequestVote
+        WorldUpdate::Deliver(1, None), // AcceptVote
+        WorldUpdate::ClientRequest(0),
+
+        // Make 1 leader in term 2
+        WorldUpdate::Timeout(1),
+        WorldUpdate::Deliver(4, None), // RequestVote
+        WorldUpdate::Deliver(4, None), // AcceptVote
+    ];
 
     let mut world = World::initial();
 
-    for update in trace.iter() {
+    for update in trace.iter_mut() {
+        world.apply_hints(update);
         world.apply(update.clone());
     }
 
-    let output = simulate(&mut trace, world, 7);
+    println!("{:#?}", trace);
+
+    let output = simulate(&mut trace, world, 9);
 
     println!("{:#?}", output);
 }

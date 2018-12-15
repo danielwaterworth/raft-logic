@@ -14,7 +14,7 @@ pub struct InFlightMessage {
 pub struct World {
     nodes: [Node<u8, TestLog>; 3],
     timers: [bool; 3],
-    messages: Vec<InFlightMessage>,
+    pub messages: Vec<InFlightMessage>,
     message_counter: usize,
 }
 
@@ -79,6 +79,15 @@ impl World {
                 Action::ClientRequestRejected { .. } => {}
                 Action::Commit { .. } => {}
             }
+        }
+    }
+
+    pub fn apply_hints(&mut self, update: &mut WorldUpdate) {
+        match update {
+            WorldUpdate::Deliver(i, msg) => {
+                *msg = Some(self.messages.get(*i).unwrap().clone());
+            },
+            _ => {},
         }
     }
 

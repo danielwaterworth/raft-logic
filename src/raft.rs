@@ -1,6 +1,6 @@
 use crate::log::{
-    compare_log_versions, InsertError, Log, LogIndex, LogStatus, LogVersion,
-    Term,
+    compare_log_versions, GetResult, InsertError, Log, LogIndex, LogStatus,
+    LogVersion, Term,
 };
 use crate::singleton::Singleton;
 
@@ -72,8 +72,8 @@ pub enum Message<Entry> {
 
     // Response to ApplyEntriesRequest, says that `index` is from `term`
     LogEntryInfo {
-        index: LogIndex,
-        term: Term,
+        entry_index: LogIndex,
+        entry_term: Term,
     },
 }
 
@@ -165,7 +165,7 @@ fn rejected_vote<'a, ServerID, Entry>(
 
 fn accepted_client_request<'a, ServerID, Entry>(
     follower_infos: &mut HashMap<ServerID, LogStatus>,
-    index: LogIndex,
+    next_index: LogIndex,
     current_term: Term,
     entry: Entry,
 ) -> Operation<'a, ServerID, Entry>
@@ -176,7 +176,7 @@ where
     let mut actions: VecDeque<Action<ServerID, Entry>> = VecDeque::new();
     for (server_id, follower_info) in follower_infos.iter_mut() {
         if let LogStatus::UpToDate = follower_info {
-            *follower_info = LogStatus::Good(index);
+            *follower_info = LogStatus::Good { next: next_index };
             actions.push_back(Action::SendMessage {
                 term: current_term,
                 server_id: server_id.clone(),
@@ -270,18 +270,38 @@ fn entries_applied<'a, ServerID, Entry>(
     let mut actions: VecDeque<Action<ServerID, Entry>> = VecDeque::new();
     actions.push_back(Action::SetTimeout);
 
-    if let Some((index, entry_term)) = version {
+    if let Some((entry_index, entry_term)) = version {
         actions.push_back(Action::SendMessage {
             term: current_term,
             server_id: leader,
             message: Message::LogEntryInfo {
-                index,
-                term: entry_term,
+                entry_index,
+                entry_term,
             },
         });
     }
 
     Operation::FreeForm(actions)
+}
+
+fn send_entries<'a, ServerID, Entry>(
+    term: Term,
+    server_id: ServerID,
+    log_version: LogVersion,
+    entries: Vec<(Term, Entry)>,
+) -> Operation<'a, ServerID, Entry>
+where
+    ServerID: Hash + Eq + Clone,
+{
+    Operation::OneAction(Singleton::new(Action::SendMessage {
+        term,
+        server_id,
+        message: Message::ApplyEntriesRequest {
+            commit: None, // FIXME
+            log_version,
+            entries,
+        },
+    }))
 }
 
 impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
@@ -481,24 +501,69 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
                     Message::VoteAccepted | Message::VoteRejected => {
                         do_nothing()
                     }
-                    Message::LogEntryInfo { index, term } => {
+                    Message::LogEntryInfo {
+                        entry_index,
+                        entry_term,
+                    } => {
                         let follower_info = follower_infos
                             .entry(server_id.clone())
                             .or_insert(LogStatus::Unknown);
 
-                        let x = self.log.check(*index, *term);
+                        let x = self.log.check(*entry_index, *entry_term);
                         if x > *follower_info {
                             *follower_info = x;
                             match follower_info {
                                 LogStatus::Unknown => unreachable!(),
                                 LogStatus::Bad(index) => {
-                                    // send an empty append entries for index-1
-                                    unimplemented!()
+                                    assert_eq!(index, entry_index);
+
+                                    if *index == 0 {
+                                        *follower_info =
+                                            LogStatus::Good { next: 0 };
+                                        match self.log.get(0) {
+                                            GetResult::Entries(entries) => {
+                                                send_entries(
+                                                    self.current_term,
+                                                    server_id.clone(),
+                                                    None,
+                                                    entries,
+                                                )
+                                            }
+                                            GetResult::Snapshot { .. } => {
+                                                unimplemented!()
+                                            }
+                                            GetResult::Fail => unreachable!(),
+                                        }
+                                    } else {
+                                        let index = *index - 1;
+                                        send_entries(
+                                            self.current_term,
+                                            server_id.clone(),
+                                            Some((index, 0)),
+                                            vec![],
+                                        )
+                                    }
                                 }
-                                LogStatus::Good(index) => {
-                                    // send all entries from index + 1 to
-                                    // latest
-                                    unimplemented!()
+                                LogStatus::Good { next } => {
+                                    assert_eq!(*next, *entry_index + 1);
+
+                                    match self.log.get(*next) {
+                                        GetResult::Entries(entries) => {
+                                            send_entries(
+                                                self.current_term,
+                                                server_id.clone(),
+                                                Some((
+                                                    *entry_index,
+                                                    *entry_term,
+                                                )),
+                                                entries,
+                                            )
+                                        }
+                                        GetResult::Snapshot { .. } => {
+                                            unimplemented!()
+                                        }
+                                        GetResult::Fail => unreachable!(),
+                                    }
                                 }
                                 LogStatus::UpToDate => do_nothing(),
                             }
@@ -725,27 +790,7 @@ mod tests {
                 server_id: "b",
                 term: 1,
             },
-            vec![
-                Action::SendMessage {
-                    term: 1,
-                    server_id: "b",
-                    message: Message::ApplyEntriesRequest {
-                        commit: None,
-                        log_version: None,
-                        entries: Vec::new(),
-                    },
-                },
-                Action::SendMessage {
-                    term: 1,
-                    server_id: "c",
-                    message: Message::ApplyEntriesRequest {
-                        commit: None,
-                        log_version: None,
-                        entries: Vec::new(),
-                    },
-                },
-                Action::ClearTimeout,
-            ],
+            vec![Action::ClearTimeout],
         );
 
         // Let's pass on the heartbeat message to b
@@ -784,7 +829,7 @@ mod tests {
                     message: Message::ApplyEntriesRequest {
                         commit: None,
                         log_version: None,
-                        entries: vec![(0, 3)],
+                        entries: vec![(1, 3)],
                     },
                 },
                 Action::SendMessage {
@@ -793,7 +838,7 @@ mod tests {
                     message: Message::ApplyEntriesRequest {
                         commit: None,
                         log_version: None,
-                        entries: vec![(0, 3)],
+                        entries: vec![(1, 3)],
                     },
                 },
             ],
@@ -815,29 +860,10 @@ mod tests {
                 Action::SendMessage {
                     term: 1,
                     server_id: "a",
-                    message: Message::LogEntryInfo { index: 0, term: 1 },
-                },
-                Action::SetTimeout,
-            ],
-        );
-
-        // Passing the response back to a, it should be committed
-        expect_actions(
-            &mut b,
-            &Input::OnMessage {
-                term: 1,
-                server_id: "a",
-                message: Message::ApplyEntriesRequest {
-                    commit: None,
-                    log_version: None,
-                    entries: vec![(1, 3)],
-                },
-            },
-            vec![
-                Action::SendMessage {
-                    term: 1,
-                    server_id: "a",
-                    message: Message::LogEntryInfo { index: 0, term: 1 },
+                    message: Message::LogEntryInfo {
+                        entry_index: 0,
+                        entry_term: 1,
+                    },
                 },
                 Action::SetTimeout,
             ],
