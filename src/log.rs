@@ -19,7 +19,12 @@ pub fn compare_log_versions(a: LogVersion, b: LogVersion) -> Ordering {
     }
 }
 
-pub type InsertResult = Result<LogVersion, ()>;
+pub enum InsertError {
+    NoSuchEntry,
+    WrongTerm { index: LogIndex, actual_term: Term },
+}
+
+pub type InsertResult = Result<(), InsertError>;
 
 pub enum GetResult<Snapshot, Entry> {
     Entries(Vec<(Term, Entry)>),
@@ -120,12 +125,13 @@ impl Log for TestLog {
         let mut index = match prev {
             None => 0,
             Some((index, term)) => match self.entries.get(index as usize) {
-                None => {
-                    return Err(())
-                }
+                None => return Err(InsertError::NoSuchEntry),
                 Some(entry) => {
                     if entry.term != term {
-                        return Err(())
+                        return Err(InsertError::WrongTerm {
+                            index,
+                            actual_term: entry.term,
+                        });
                     } else {
                         index + 1
                     }
@@ -135,7 +141,7 @@ impl Log for TestLog {
         for entry in entries.iter() {
             if self.entries.len() > index as usize {
                 if self.entries[index as usize].term != entry.0 {
-                    return Err(());
+                    self.entries.truncate(index as usize);
                 }
             } else {
                 self.entries.push(TestEntry {
@@ -145,7 +151,7 @@ impl Log for TestLog {
             }
             index += 1;
         }
-        Ok(self.version())
+        Ok(())
     }
 
     fn append(&mut self, term: Term, value: usize) -> LogIndex {
@@ -165,6 +171,19 @@ impl Log for TestLog {
     }
 
     fn check(&self, index: LogIndex, term: Term) -> LogStatus {
-        unimplemented!()
+        match self.entries.get(index as usize) {
+            None => LogStatus::Bad(index),
+            Some(entry) => {
+                if entry.term == term {
+                    if index as usize == self.entries.len() - 1 {
+                        LogStatus::UpToDate
+                    } else {
+                        LogStatus::Good(index)
+                    }
+                } else {
+                    LogStatus::Bad(index)
+                }
+            }
+        }
     }
 }

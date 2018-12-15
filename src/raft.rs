@@ -1,5 +1,6 @@
 use crate::log::{
-    compare_log_versions, Log, LogIndex, LogStatus, LogVersion, Term,
+    compare_log_versions, InsertError, Log, LogIndex, LogStatus, LogVersion,
+    Term,
 };
 use crate::singleton::Singleton;
 
@@ -186,7 +187,7 @@ where
                 message: Message::ApplyEntriesRequest {
                     commit: None,
                     log_version: None,
-                    entries: vec![(index, entry.clone())],
+                    entries: vec![(current_term, entry.clone())],
                 },
             });
         }
@@ -287,16 +288,6 @@ fn entries_applied<'a, ServerID, Entry>(
     Operation::FreeForm(actions)
 }
 
-fn entries_not_applied<'a, ServerID, Entry>(
-    term: Term,
-    leader: ServerID,
-    version: LogVersion,
-) -> Operation<'a, ServerID, Entry> {
-    // ResetTimeout
-    // Reply to leader
-    unimplemented!()
-}
-
 impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
     pub fn new(
         server_id: ServerID,
@@ -375,19 +366,21 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
 
                         let result = self.log.insert(*log_version, &entries);
                         match result {
-                            Ok(version) => entries_applied(
+                            Ok(()) | Err(InsertError::NoSuchEntry) => {
+                                entries_applied(
+                                    *term,
+                                    server_id.clone(),
+                                    self.log.version(),
+                                )
+                            }
+                            Err(InsertError::WrongTerm {
+                                index,
+                                actual_term,
+                            }) => entries_applied(
                                 *term,
                                 server_id.clone(),
-                                version,
+                                Some((index, actual_term)),
                             ),
-                            Err(version) => {
-                                unimplemented!()
-                                // entries_not_applied(
-                                //     *term,
-                                //     server_id.clone(),
-                                //     version,
-                                // )
-                            },
                         }
                     }
                     Message::VoteAccepted | Message::VoteRejected => {
