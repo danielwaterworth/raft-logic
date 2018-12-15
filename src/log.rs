@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::cmp::{max, Ordering};
 
 pub type Term = u64;
 pub type LogIndex = u64;
@@ -19,13 +19,10 @@ pub fn compare_log_versions(a: LogVersion, b: LogVersion) -> Ordering {
     }
 }
 
-pub type InsertResult = Result<LogVersion, LogVersion>;
+pub type InsertResult = Result<LogVersion, ()>;
 
 pub enum GetResult<Snapshot, Entry> {
-    Entry {
-        term: Term,
-        entry: Entry,
-    },
+    Entries(Vec<(Term, Entry)>),
     Snapshot {
         snapshot: Snapshot,
         version: LogVersion,
@@ -70,22 +67,21 @@ pub trait Log {
 
     fn empty() -> Self;
 
+    // Used by followers
     fn commit(&mut self, index: LogIndex);
-    fn insert_entry(
-        &mut self,
-        prev: LogVersion,
-        entriy: (Term, Self::Entry),
-    ) -> InsertResult;
     fn insert(
         &mut self,
         prev: LogVersion,
         entries: &[(Term, Self::Entry)],
     ) -> InsertResult;
-    fn append(&mut self, term: Term, entry: Self::Entry) -> LogIndex;
 
+    // Used by leader
+    fn append(&mut self, term: Term, entry: Self::Entry) -> LogIndex;
     fn get(&self, index: LogIndex) -> GetResult<Self::Snapshot, Self::Entry>;
-    fn version(&self) -> LogVersion;
     fn check(&self, index: LogIndex, term: Term) -> LogStatus;
+
+    // Used during elections
+    fn version(&self) -> LogVersion;
 }
 
 #[derive(Clone)]
@@ -112,23 +108,44 @@ impl Log for TestLog {
     }
 
     fn commit(&mut self, index: LogIndex) {
-        self.next_commit_index = (index + 1) as usize;
-    }
-
-    fn insert_entry(
-        &mut self,
-        prev: LogVersion,
-        entry: (Term, usize),
-    ) -> InsertResult {
-        unimplemented!()
+        self.next_commit_index =
+            max(self.next_commit_index, (index + 1) as usize);
     }
 
     fn insert(
         &mut self,
         prev: LogVersion,
-        entry: &[(Term, usize)],
+        entries: &[(Term, usize)],
     ) -> InsertResult {
-        unimplemented!()
+        let mut index = match prev {
+            None => 0,
+            Some((index, term)) => match self.entries.get(index as usize) {
+                None => {
+                    return Err(())
+                }
+                Some(entry) => {
+                    if entry.term != term {
+                        return Err(())
+                    } else {
+                        index + 1
+                    }
+                }
+            },
+        };
+        for entry in entries.iter() {
+            if self.entries.len() > index as usize {
+                if self.entries[index as usize].term != entry.0 {
+                    return Err(());
+                }
+            } else {
+                self.entries.push(TestEntry {
+                    term: entry.0,
+                    value: entry.1,
+                });
+            }
+            index += 1;
+        }
+        Ok(self.version())
     }
 
     fn append(&mut self, term: Term, value: usize) -> LogIndex {

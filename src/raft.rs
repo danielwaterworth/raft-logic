@@ -111,7 +111,6 @@ pub enum Operation<'a, ServerID, Entry> {
     DoNothing,
     OneAction(Singleton<Action<ServerID, Entry>>),
     AcceptedClientRequest,
-    LogEntryInfo,
     TransitionToFollower {
         then: Box<Operation<'a, ServerID, Entry>>,
     },
@@ -128,7 +127,6 @@ impl<'a, ServerID, Entry> Iterator for Operation<'a, ServerID, Entry> {
             Operation::DoNothing => None,
             Operation::OneAction(iter) => iter.next(),
             Operation::AcceptedClientRequest => unimplemented!(),
-            Operation::LogEntryInfo => unimplemented!(),
             Operation::FreeForm(ref mut items) => items.pop_front(),
             Operation::TransitionToFollower { then } => {
                 let mut tmp = do_nothing();
@@ -299,8 +297,6 @@ fn entries_not_applied<'a, ServerID, Entry>(
     unimplemented!()
 }
 
-fn check_log<L: Log>(l: &mut L) {}
-
 impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
     pub fn new(
         server_id: ServerID,
@@ -384,11 +380,14 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
                                 server_id.clone(),
                                 version,
                             ),
-                            Err(version) => entries_not_applied(
-                                *term,
-                                server_id.clone(),
-                                version,
-                            ),
+                            Err(version) => {
+                                unimplemented!()
+                                // entries_not_applied(
+                                //     *term,
+                                //     server_id.clone(),
+                                //     version,
+                                // )
+                            },
                         }
                     }
                     Message::VoteAccepted | Message::VoteRejected => {
