@@ -111,11 +111,9 @@ pub enum Action<ServerID, Entry> {
 pub enum Operation<'a, ServerID, Entry> {
     DoNothing,
     OneAction(Singleton<Action<ServerID, Entry>>),
-    AcceptedClientRequest,
     TransitionToFollower {
         then: Box<Operation<'a, ServerID, Entry>>,
     },
-    TransitionToLeader,
     Phantom(&'a u8),
     FreeForm(VecDeque<Action<ServerID, Entry>>),
 }
@@ -127,7 +125,6 @@ impl<'a, ServerID, Entry> Iterator for Operation<'a, ServerID, Entry> {
         match self {
             Operation::DoNothing => None,
             Operation::OneAction(iter) => iter.next(),
-            Operation::AcceptedClientRequest => unimplemented!(),
             Operation::FreeForm(ref mut items) => items.pop_front(),
             Operation::TransitionToFollower { then } => {
                 let mut tmp = do_nothing();
@@ -135,7 +132,6 @@ impl<'a, ServerID, Entry> Iterator for Operation<'a, ServerID, Entry> {
                 *self = tmp;
                 Some(Action::SetTimeout)
             }
-            Operation::TransitionToLeader => unimplemented!(),
             Operation::Phantom(_) => unreachable!(),
         }
     }
