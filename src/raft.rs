@@ -472,6 +472,22 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
         }
     }
 
+    fn send_from_zero(
+        &mut self,
+        server_id: ServerID,
+    ) -> Operation<ServerID, L::Entry> {
+        match self.log.get(0) {
+            GetResult::Entries(entries) => send_entries(
+                self.current_term,
+                server_id.clone(),
+                None,
+                entries,
+            ),
+            GetResult::Snapshot { .. } => unimplemented!(),
+            GetResult::Fail => unreachable!(),
+        }
+    }
+
     fn handle_log_entry_info(
         &mut self,
         term: Term,
@@ -496,24 +512,11 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
                         if x > *follower_info {
                             *follower_info = x;
 
-                            match self.log.get(0) {
-                                GetResult::Entries(entries) => {
-                                    send_entries(
-                                        self.current_term,
-                                        server_id.clone(),
-                                        None,
-                                        entries,
-                                    )
-                                }
-                                GetResult::Snapshot { .. } => {
-                                    unimplemented!()
-                                }
-                                GetResult::Fail => unreachable!(),
-                            }
+                            self.send_from_zero(server_id.clone())
                         } else {
                             do_nothing()
                         }
-                    },
+                    }
                     Some((entry_index, entry_term)) => {
                         let x = self.log.check(entry_index, entry_term);
                         if x > *follower_info {
@@ -526,20 +529,7 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
                                     if *index == 0 {
                                         *follower_info =
                                             LogStatus::Good { next: 0 };
-                                        match self.log.get(0) {
-                                            GetResult::Entries(entries) => {
-                                                send_entries(
-                                                    self.current_term,
-                                                    server_id.clone(),
-                                                    None,
-                                                    entries,
-                                                )
-                                            }
-                                            GetResult::Snapshot { .. } => {
-                                                unimplemented!()
-                                            }
-                                            GetResult::Fail => unreachable!(),
-                                        }
+                                        self.send_from_zero(server_id.clone())
                                     } else {
                                         let index = *index - 1;
                                         send_entries(
@@ -999,9 +989,7 @@ mod tests {
                 Action::SendMessage {
                     server_id: "a",
                     term: 1,
-                    message: Message::LogEntryInfo {
-                        version: None,
-                    },
+                    message: Message::LogEntryInfo { version: None },
                 },
             ],
         );
