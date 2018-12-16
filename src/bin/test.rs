@@ -39,11 +39,6 @@ fn main() {
         WorldUpdate::Deliver(0, None), // RequestVote
         WorldUpdate::Deliver(1, None), // AcceptVote
         WorldUpdate::ClientRequest(0),
-
-        // Make 1 leader in term 2
-        WorldUpdate::Timeout(1),
-        WorldUpdate::Deliver(4, None), // RequestVote
-        WorldUpdate::Deliver(4, None), // AcceptVote
     ];
 
     let mut world = World::initial();

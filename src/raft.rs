@@ -333,253 +333,306 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
         )
     }
 
+    fn handle_client_request(
+        &mut self,
+        entry: L::Entry,
+    ) -> Operation<ServerID, L::Entry> {
+        match &mut self.state {
+            State::Follower(follower_state) => {
+                rejected_client_request(follower_state.current_leader())
+            }
+            State::Candidate { .. } => rejected_client_request(None),
+            State::Leader { follower_infos } => {
+                let index = self.log.append(self.current_term, entry.clone());
+
+                accepted_client_request(
+                    follower_infos,
+                    index,
+                    self.current_term,
+                    entry.clone(),
+                )
+            }
+        }
+    }
+
+    fn handle_request_vote(
+        &mut self,
+        term: Term,
+        server_id: ServerID,
+        version: LogVersion,
+    ) -> Operation<ServerID, L::Entry> {
+        match &mut self.state {
+            State::Follower(follower_state) => {
+                let cmp = compare_log_versions(version, self.log.version())
+                    != Ordering::Less;
+
+                if follower_state.can_vote() && cmp {
+                    *follower_state = FollowerState::Voted(server_id.clone());
+                    accepted_vote(self.current_term, server_id)
+                } else {
+                    rejected_vote(self.current_term, server_id)
+                }
+            }
+            State::Candidate { votes_received } => {
+                rejected_vote(self.current_term, server_id)
+            }
+            State::Leader { follower_infos } => {
+                rejected_vote(self.current_term, server_id)
+            }
+        }
+    }
+
+    fn handle_install_snapshot(
+        &mut self,
+        term: Term,
+        server_id: ServerID,
+    ) -> Operation<ServerID, L::Entry> {
+        unimplemented!()
+    }
+
+    fn handle_apply_entries(
+        &mut self,
+        term: Term,
+        server_id: ServerID,
+        commit: LogVersion,
+        entries: Vec<(Term, L::Entry)>,
+        log_version: LogVersion,
+    ) -> Operation<ServerID, L::Entry> {
+        match &mut self.state {
+            State::Follower(follower_state) => {
+                *follower_state = FollowerState::Following(server_id.clone());
+
+                let result = self.log.insert(log_version, &entries);
+                match result {
+                    Ok(()) | Err(InsertError::NoSuchEntry) => {
+                        // FIXME
+                        entries_applied(term, server_id, self.log.version())
+                    }
+                    Err(InsertError::WrongTerm { index, actual_term }) => {
+                        entries_applied(
+                            term,
+                            server_id.clone(),
+                            Some((index, actual_term)),
+                        )
+                    }
+                }
+            }
+            State::Candidate { votes_received } => {
+                self.state = State::Follower(FollowerState::Following(
+                    self.server_id.clone(),
+                ));
+
+                transition_to_follower(self.process(&Input::OnMessage {
+                    term,
+                    server_id,
+                    message: Message::ApplyEntriesRequest {
+                        entries,
+                        commit,
+                        log_version,
+                    },
+                }))
+            }
+            State::Leader { follower_infos } => {
+                unreachable!("cannot have two leaders in the same term")
+            }
+        }
+    }
+
+    fn handle_vote_accepted(
+        &mut self,
+        term: Term,
+        server_id: ServerID,
+    ) -> Operation<ServerID, L::Entry> {
+        match &mut self.state {
+            State::Follower(follower_state) => do_nothing(),
+            State::Candidate { votes_received } => {
+                votes_received.insert(server_id.clone());
+                let num_servers = self.servers.len();
+                let votes = votes_received.len() + 1;
+                if votes * 2 > num_servers {
+                    let should_sync = self.log.version().is_some();
+                    let value = if should_sync {
+                        LogStatus::Unknown
+                    } else {
+                        LogStatus::UpToDate
+                    };
+
+                    let follower_infos = self
+                        .servers
+                        .iter()
+                        .filter(|server_id| **server_id != self.server_id)
+                        .map(|server_id| (server_id.clone(), value.clone()))
+                        .collect();
+
+                    self.state = State::Leader { follower_infos };
+
+                    if should_sync {
+                        transition_to_leader(
+                            self.current_term,
+                            &self.servers,
+                            &self.server_id,
+                            self.log.version(),
+                        )
+                    } else {
+                        clear_timer()
+                    }
+                } else {
+                    do_nothing()
+                }
+            }
+            State::Leader { follower_infos } => do_nothing(),
+        }
+    }
+
+    fn handle_log_entry_info(
+        &mut self,
+        term: Term,
+        server_id: ServerID,
+        entry_index: LogIndex,
+        entry_term: Term,
+    ) -> Operation<ServerID, L::Entry> {
+        match &mut self.state {
+            State::Follower(follower_state) => unreachable!(
+                "Cannot transition from leader to follower in the same term"
+            ),
+            State::Candidate { votes_received } => unreachable!(
+                "Cannot transition from leader to candidate in the same term"
+            ),
+            State::Leader { follower_infos } => {
+                let follower_info = follower_infos
+                    .entry(server_id.clone())
+                    .or_insert(LogStatus::Unknown);
+
+                let x = self.log.check(entry_index, entry_term);
+                if x > *follower_info {
+                    *follower_info = x;
+                    match follower_info {
+                        LogStatus::Unknown => unreachable!(),
+                        LogStatus::Bad(index) => {
+                            assert_eq!(*index, entry_index);
+
+                            if *index == 0 {
+                                *follower_info = LogStatus::Good { next: 0 };
+                                match self.log.get(0) {
+                                    GetResult::Entries(entries) => {
+                                        send_entries(
+                                            self.current_term,
+                                            server_id.clone(),
+                                            None,
+                                            entries,
+                                        )
+                                    }
+                                    GetResult::Snapshot { .. } => {
+                                        unimplemented!()
+                                    }
+                                    GetResult::Fail => unreachable!(),
+                                }
+                            } else {
+                                let index = *index - 1;
+                                send_entries(
+                                    self.current_term,
+                                    server_id.clone(),
+                                    Some((index, 0)),
+                                    vec![],
+                                )
+                            }
+                        }
+                        LogStatus::Good { next } => {
+                            assert_eq!(*next, entry_index + 1);
+
+                            match self.log.get(*next) {
+                                GetResult::Entries(entries) => send_entries(
+                                    self.current_term,
+                                    server_id.clone(),
+                                    Some((entry_index, entry_term)),
+                                    entries,
+                                ),
+                                GetResult::Snapshot { .. } => unimplemented!(),
+                                GetResult::Fail => unreachable!(),
+                            }
+                        }
+                        LogStatus::UpToDate => do_nothing(),
+                    }
+                } else if let LogStatus::Unknown = x {
+                    unimplemented!("send snapshot")
+                } else {
+                    // We received a duplicate response
+                    do_nothing()
+                }
+            }
+        }
+    }
+
+    fn handle_timeout(&mut self) -> Operation<ServerID, L::Entry> {
+        match &mut self.state {
+            State::Follower(follower_state) => self.transition_to_candidate(),
+            State::Candidate { votes_received } => {
+                self.transition_to_candidate()
+            }
+            State::Leader { follower_infos } => do_nothing(),
+        }
+    }
+
     pub fn process(
         &mut self,
         input: &Input<ServerID, L::Entry>,
     ) -> Operation<ServerID, L::Entry> {
-        if let Input::OnMessage { term, .. } = input {
-            if self.current_term > *term {
-                return do_nothing();
+        return match input {
+            Input::ClientRequest { entry } => {
+                self.handle_client_request(entry.clone())
             }
-            if *term > self.current_term {
-                self.current_term = *term;
-                self.state = State::Follower(FollowerState::Oblivious);
-                return transition_to_follower(self.process(input));
-            }
-        }
-
-        match &mut self.state {
-            State::Follower(follower_state) => match input {
-                Input::ClientRequest { .. } => {
-                    rejected_client_request(follower_state.current_leader())
+            Input::OnMessage {
+                message,
+                term,
+                server_id,
+            } => {
+                if self.current_term > *term {
+                    return do_nothing();
                 }
-                Input::OnMessage {
-                    message,
-                    term,
-                    server_id,
-                } => match message {
-                    Message::RequestVote { version } => {
-                        let cmp =
-                            compare_log_versions(*version, self.log.version())
-                                != Ordering::Less;
+                if *term > self.current_term {
+                    self.current_term = *term;
+                    self.state = State::Follower(FollowerState::Oblivious);
+                    return transition_to_follower(self.process(input));
+                }
 
-                        if follower_state.can_vote() && cmp {
-                            *follower_state =
-                                FollowerState::Voted(server_id.clone());
-                            accepted_vote(self.current_term, server_id.clone())
-                        } else {
-                            rejected_vote(self.current_term, server_id.clone())
-                        }
+                match message {
+                    Message::RequestVote { version } => self
+                        .handle_request_vote(
+                            *term,
+                            server_id.clone(),
+                            *version,
+                        ),
+                    Message::InstallSnapshot => {
+                        self.handle_install_snapshot(*term, server_id.clone())
                     }
-                    Message::InstallSnapshot => unimplemented!(),
                     Message::ApplyEntriesRequest {
                         commit,
                         entries,
                         log_version,
-                    } => {
-                        *follower_state =
-                            FollowerState::Following(server_id.clone());
-
-                        let result = self.log.insert(*log_version, &entries);
-                        match result {
-                            Ok(()) | Err(InsertError::NoSuchEntry) => {
-                                entries_applied(
-                                    *term,
-                                    server_id.clone(),
-                                    self.log.version(),
-                                )
-                            }
-                            Err(InsertError::WrongTerm {
-                                index,
-                                actual_term,
-                            }) => entries_applied(
-                                *term,
-                                server_id.clone(),
-                                Some((index, actual_term)),
-                            ),
-                        }
-                    }
-                    Message::VoteAccepted | Message::VoteRejected => {
-                        do_nothing()
-                    }
-                    Message::LogEntryInfo { .. } => unreachable!(
-                        "Cannot transition from leader to follower in the \
-                         same term"
+                    } => self.handle_apply_entries(
+                        *term,
+                        server_id.clone(),
+                        *commit,
+                        entries.clone(),
+                        *log_version,
                     ),
-                },
-                Input::Timeout => self.transition_to_candidate(),
-            },
-            State::Candidate { votes_received } => match input {
-                Input::ClientRequest { .. } => rejected_client_request(None),
-                Input::OnMessage {
-                    message,
-                    term,
-                    server_id,
-                } => match message {
-                    Message::RequestVote { .. } => {
-                        rejected_vote(*term, server_id.clone())
-                    }
-                    Message::ApplyEntriesRequest { .. }
-                    | Message::InstallSnapshot => {
-                        self.state = State::Follower(
-                            FollowerState::Following(self.server_id.clone()),
-                        );
-
-                        transition_to_follower(self.process(input))
-                    }
                     Message::VoteAccepted => {
-                        votes_received.insert(server_id.clone());
-                        let num_servers = self.servers.len();
-                        let votes = votes_received.len() + 1;
-                        if votes * 2 > num_servers {
-                            let should_sync = self.log.version().is_some();
-                            let value = if should_sync {
-                                LogStatus::Unknown
-                            } else {
-                                LogStatus::UpToDate
-                            };
-
-                            let follower_infos = self
-                                .servers
-                                .iter()
-                                .filter(|server_id| {
-                                    **server_id != self.server_id
-                                })
-                                .map(|server_id| {
-                                    (server_id.clone(), value.clone())
-                                })
-                                .collect();
-
-                            self.state = State::Leader { follower_infos };
-
-                            if should_sync {
-                                transition_to_leader(
-                                    self.current_term,
-                                    &self.servers,
-                                    &self.server_id,
-                                    self.log.version(),
-                                )
-                            } else {
-                                clear_timer()
-                            }
-                        } else {
-                            do_nothing()
-                        }
+                        self.handle_vote_accepted(*term, server_id.clone())
                     }
                     Message::VoteRejected => do_nothing(),
-                    Message::LogEntryInfo { .. } => unreachable!(
-                        "Cannot transition from leader to candidate in the \
-                         same term"
-                    ),
-                },
-                Input::Timeout => self.transition_to_candidate(),
-            },
-            State::Leader { follower_infos } => match input {
-                Input::ClientRequest { entry } => {
-                    let index =
-                        self.log.append(self.current_term, entry.clone());
-
-                    accepted_client_request(
-                        follower_infos,
-                        index,
-                        self.current_term,
-                        entry.clone(),
-                    )
-                }
-                Input::OnMessage {
-                    message,
-                    term,
-                    server_id,
-                } => match message {
-                    Message::RequestVote { .. } => {
-                        rejected_vote(*term, server_id.clone())
-                    }
-                    Message::ApplyEntriesRequest { .. }
-                    | Message::InstallSnapshot => unreachable!(
-                        "cannot have two leaders in the same term"
-                    ),
-                    Message::VoteAccepted | Message::VoteRejected => {
-                        do_nothing()
-                    }
                     Message::LogEntryInfo {
                         entry_index,
                         entry_term,
-                    } => {
-                        let follower_info = follower_infos
-                            .entry(server_id.clone())
-                            .or_insert(LogStatus::Unknown);
-
-                        let x = self.log.check(*entry_index, *entry_term);
-                        if x > *follower_info {
-                            *follower_info = x;
-                            match follower_info {
-                                LogStatus::Unknown => unreachable!(),
-                                LogStatus::Bad(index) => {
-                                    assert_eq!(index, entry_index);
-
-                                    if *index == 0 {
-                                        *follower_info =
-                                            LogStatus::Good { next: 0 };
-                                        match self.log.get(0) {
-                                            GetResult::Entries(entries) => {
-                                                send_entries(
-                                                    self.current_term,
-                                                    server_id.clone(),
-                                                    None,
-                                                    entries,
-                                                )
-                                            }
-                                            GetResult::Snapshot { .. } => {
-                                                unimplemented!()
-                                            }
-                                            GetResult::Fail => unreachable!(),
-                                        }
-                                    } else {
-                                        let index = *index - 1;
-                                        send_entries(
-                                            self.current_term,
-                                            server_id.clone(),
-                                            Some((index, 0)),
-                                            vec![],
-                                        )
-                                    }
-                                }
-                                LogStatus::Good { next } => {
-                                    assert_eq!(*next, *entry_index + 1);
-
-                                    match self.log.get(*next) {
-                                        GetResult::Entries(entries) => {
-                                            send_entries(
-                                                self.current_term,
-                                                server_id.clone(),
-                                                Some((
-                                                    *entry_index,
-                                                    *entry_term,
-                                                )),
-                                                entries,
-                                            )
-                                        }
-                                        GetResult::Snapshot { .. } => {
-                                            unimplemented!()
-                                        }
-                                        GetResult::Fail => unreachable!(),
-                                    }
-                                }
-                                LogStatus::UpToDate => do_nothing(),
-                            }
-                        } else if let LogStatus::Unknown = x {
-                            unimplemented!("send snapshot")
-                        } else {
-                            // We received a duplicate response
-                            do_nothing()
-                        }
-                    }
-                },
-                Input::Timeout => {
-                    unreachable!("No timer should have been set")
+                    } => self.handle_log_entry_info(
+                        *term,
+                        server_id.clone(),
+                        *entry_index,
+                        *entry_term,
+                    ),
                 }
-            },
-        }
+            }
+            Input::Timeout => self.handle_timeout(),
+        };
     }
 }
 
@@ -867,6 +920,20 @@ mod tests {
                 },
                 Action::SetTimeout,
             ],
+        );
+
+        // This is should cause the entry to be committed
+        expect_actions(
+            &mut a,
+            &Input::OnMessage {
+                term: 1,
+                server_id: "b",
+                message: Message::LogEntryInfo {
+                    entry_index: 0,
+                    entry_term: 1,
+                },
+            },
+            vec![],
         );
     }
 }
