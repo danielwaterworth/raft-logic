@@ -70,10 +70,10 @@ pub enum Message<Entry> {
     VoteAccepted,
     VoteRejected,
 
-    // Response to ApplyEntriesRequest, says that `index` is from `term`
+    // Response to ApplyEntriesRequest, says that log is at least
+    // version,
     LogEntryInfo {
-        entry_index: LogIndex,
-        entry_term: Term,
+        version: LogVersion,
     },
 }
 
@@ -258,10 +258,6 @@ where
     Operation::FreeForm(actions)
 }
 
-fn clear_timer<'a, ServerID, Entry>() -> Operation<'a, ServerID, Entry> {
-    Operation::OneAction(Singleton::new(Action::ClearTimeout))
-}
-
 fn entries_applied<'a, ServerID, Entry>(
     current_term: Term,
     leader: ServerID,
@@ -270,16 +266,11 @@ fn entries_applied<'a, ServerID, Entry>(
     let mut actions: VecDeque<Action<ServerID, Entry>> = VecDeque::new();
     actions.push_back(Action::SetTimeout);
 
-    if let Some((entry_index, entry_term)) = version {
-        actions.push_back(Action::SendMessage {
-            term: current_term,
-            server_id: leader,
-            message: Message::LogEntryInfo {
-                entry_index,
-                entry_term,
-            },
-        });
-    }
+    actions.push_back(Action::SendMessage {
+        term: current_term,
+        server_id: leader,
+        message: Message::LogEntryInfo { version },
+    });
 
     Operation::FreeForm(actions)
 }
@@ -404,10 +395,11 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
 
                 let result = self.log.insert(log_version, &entries);
                 match result {
-                    Ok(()) | Err(InsertError::NoSuchEntry) => {
-                        // FIXME
-                        entries_applied(term, server_id, self.log.version())
-                    }
+                    Ok(()) | Err(InsertError::NoSuchEntry) => entries_applied(
+                        term,
+                        server_id.clone(),
+                        self.log.version(),
+                    ),
                     Err(InsertError::WrongTerm { index, actual_term }) => {
                         entries_applied(
                             term,
@@ -466,16 +458,12 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
 
                     self.state = State::Leader { follower_infos };
 
-                    if should_sync {
-                        transition_to_leader(
-                            self.current_term,
-                            &self.servers,
-                            &self.server_id,
-                            self.log.version(),
-                        )
-                    } else {
-                        clear_timer()
-                    }
+                    transition_to_leader(
+                        self.current_term,
+                        &self.servers,
+                        &self.server_id,
+                        self.log.version(),
+                    )
                 } else {
                     do_nothing()
                 }
@@ -488,8 +476,7 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
         &mut self,
         term: Term,
         server_id: ServerID,
-        entry_index: LogIndex,
-        entry_term: Term,
+        version: LogVersion,
     ) -> Operation<ServerID, L::Entry> {
         match &mut self.state {
             State::Follower(follower_state) => unreachable!(
@@ -503,61 +490,96 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
                     .entry(server_id.clone())
                     .or_insert(LogStatus::Unknown);
 
-                let x = self.log.check(entry_index, entry_term);
-                if x > *follower_info {
-                    *follower_info = x;
-                    match follower_info {
-                        LogStatus::Unknown => unreachable!(),
-                        LogStatus::Bad(index) => {
-                            assert_eq!(*index, entry_index);
+                match version {
+                    None => {
+                        let x = LogStatus::Good { next: 0 };
+                        if x > *follower_info {
+                            *follower_info = x;
 
-                            if *index == 0 {
-                                *follower_info = LogStatus::Good { next: 0 };
-                                match self.log.get(0) {
-                                    GetResult::Entries(entries) => {
+                            match self.log.get(0) {
+                                GetResult::Entries(entries) => {
+                                    send_entries(
+                                        self.current_term,
+                                        server_id.clone(),
+                                        None,
+                                        entries,
+                                    )
+                                }
+                                GetResult::Snapshot { .. } => {
+                                    unimplemented!()
+                                }
+                                GetResult::Fail => unreachable!(),
+                            }
+                        } else {
+                            do_nothing()
+                        }
+                    },
+                    Some((entry_index, entry_term)) => {
+                        let x = self.log.check(entry_index, entry_term);
+                        if x > *follower_info {
+                            *follower_info = x;
+                            match follower_info {
+                                LogStatus::Unknown => unreachable!(),
+                                LogStatus::Bad(index) => {
+                                    assert_eq!(*index, entry_index);
+
+                                    if *index == 0 {
+                                        *follower_info =
+                                            LogStatus::Good { next: 0 };
+                                        match self.log.get(0) {
+                                            GetResult::Entries(entries) => {
+                                                send_entries(
+                                                    self.current_term,
+                                                    server_id.clone(),
+                                                    None,
+                                                    entries,
+                                                )
+                                            }
+                                            GetResult::Snapshot { .. } => {
+                                                unimplemented!()
+                                            }
+                                            GetResult::Fail => unreachable!(),
+                                        }
+                                    } else {
+                                        let index = *index - 1;
                                         send_entries(
                                             self.current_term,
                                             server_id.clone(),
-                                            None,
-                                            entries,
+                                            Some((index, 0)),
+                                            vec![],
                                         )
                                     }
-                                    GetResult::Snapshot { .. } => {
-                                        unimplemented!()
-                                    }
-                                    GetResult::Fail => unreachable!(),
                                 }
-                            } else {
-                                let index = *index - 1;
-                                send_entries(
-                                    self.current_term,
-                                    server_id.clone(),
-                                    Some((index, 0)),
-                                    vec![],
-                                )
-                            }
-                        }
-                        LogStatus::Good { next } => {
-                            assert_eq!(*next, entry_index + 1);
+                                LogStatus::Good { next } => {
+                                    assert_eq!(*next, entry_index + 1);
 
-                            match self.log.get(*next) {
-                                GetResult::Entries(entries) => send_entries(
-                                    self.current_term,
-                                    server_id.clone(),
-                                    Some((entry_index, entry_term)),
-                                    entries,
-                                ),
-                                GetResult::Snapshot { .. } => unimplemented!(),
-                                GetResult::Fail => unreachable!(),
+                                    match self.log.get(*next) {
+                                        GetResult::Entries(entries) => {
+                                            send_entries(
+                                                self.current_term,
+                                                server_id.clone(),
+                                                Some((
+                                                    entry_index,
+                                                    entry_term,
+                                                )),
+                                                entries,
+                                            )
+                                        }
+                                        GetResult::Snapshot { .. } => {
+                                            unimplemented!()
+                                        }
+                                        GetResult::Fail => unreachable!(),
+                                    }
+                                }
+                                LogStatus::UpToDate => do_nothing(),
                             }
+                        } else if let LogStatus::Unknown = x {
+                            unimplemented!("send snapshot")
+                        } else {
+                            // We received a duplicate response
+                            do_nothing()
                         }
-                        LogStatus::UpToDate => do_nothing(),
                     }
-                } else if let LogStatus::Unknown = x {
-                    unimplemented!("send snapshot")
-                } else {
-                    // We received a duplicate response
-                    do_nothing()
                 }
             }
         }
@@ -620,15 +642,12 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
                         self.handle_vote_accepted(*term, server_id.clone())
                     }
                     Message::VoteRejected => do_nothing(),
-                    Message::LogEntryInfo {
-                        entry_index,
-                        entry_term,
-                    } => self.handle_log_entry_info(
-                        *term,
-                        server_id.clone(),
-                        *entry_index,
-                        *entry_term,
-                    ),
+                    Message::LogEntryInfo { version } => self
+                        .handle_log_entry_info(
+                            *term,
+                            server_id.clone(),
+                            *version,
+                        ),
                 }
             }
             Input::Timeout => self.handle_timeout(),
@@ -660,6 +679,96 @@ mod tests {
             expected_actions.into_iter().collect();
 
         assert_eq!(actions, expected_actions);
+    }
+
+    #[test]
+    fn follower_apply_entries_1() {
+        let mut server_ids = HashSet::new();
+        server_ids.insert("a");
+        server_ids.insert("b");
+        server_ids.insert("c");
+
+        let mut a: TestNode = Node::new("a", server_ids.clone());
+
+        // From an empty log, a leader should be able to add an entry
+        expect_actions(
+            &mut a,
+            &Input::OnMessage {
+                term: 1,
+                server_id: "b",
+                message: Message::ApplyEntriesRequest {
+                    commit: None,
+                    log_version: None,
+                    entries: vec![(1, 1)],
+                },
+            },
+            vec![
+                Action::SendMessage {
+                    term: 1,
+                    server_id: "b",
+                    message: Message::LogEntryInfo {
+                        version: Some((0, 1)),
+                    },
+                },
+                Action::SetTimeout,
+            ],
+        );
+
+        // A new leader should be able to overwrite the value previously
+        // written
+        expect_actions(
+            &mut a,
+            &Input::OnMessage {
+                term: 2,
+                server_id: "c",
+                message: Message::ApplyEntriesRequest {
+                    commit: None,
+                    log_version: None,
+                    entries: vec![(2, 2)],
+                },
+            },
+            vec![
+                Action::SendMessage {
+                    term: 2,
+                    server_id: "c",
+                    message: Message::LogEntryInfo {
+                        version: Some((0, 2)),
+                    },
+                },
+                Action::SetTimeout,
+            ],
+        );
+    }
+
+    #[test]
+    fn follower_apply_entries_2() {
+        let mut server_ids = HashSet::new();
+        server_ids.insert("a");
+        server_ids.insert("b");
+        server_ids.insert("c");
+
+        let mut a: TestNode = Node::new("a", server_ids.clone());
+
+        expect_actions(
+            &mut a,
+            &Input::OnMessage {
+                term: 2,
+                server_id: "b",
+                message: Message::ApplyEntriesRequest {
+                    commit: None,
+                    log_version: Some((1, 1)),
+                    entries: vec![(2, 1)],
+                },
+            },
+            vec![
+                Action::SendMessage {
+                    term: 2,
+                    server_id: "b",
+                    message: Message::LogEntryInfo { version: None },
+                },
+                Action::SetTimeout,
+            ],
+        );
     }
 
     #[test]
@@ -701,7 +810,14 @@ mod tests {
                     entries: Vec::new(),
                 },
             },
-            vec![Action::SetTimeout],
+            vec![
+                Action::SetTimeout,
+                Action::SendMessage {
+                    term: 1,
+                    server_id: "b",
+                    message: Message::LogEntryInfo { version: None },
+                },
+            ],
         );
     }
 
@@ -843,7 +959,27 @@ mod tests {
                 server_id: "b",
                 term: 1,
             },
-            vec![Action::ClearTimeout],
+            vec![
+                Action::ClearTimeout,
+                Action::SendMessage {
+                    server_id: "b",
+                    term: 1,
+                    message: Message::ApplyEntriesRequest {
+                        commit: None,
+                        log_version: None,
+                        entries: vec![],
+                    },
+                },
+                Action::SendMessage {
+                    server_id: "c",
+                    term: 1,
+                    message: Message::ApplyEntriesRequest {
+                        commit: None,
+                        log_version: None,
+                        entries: vec![],
+                    },
+                },
+            ],
         );
 
         // Let's pass on the heartbeat message to b
@@ -858,7 +994,16 @@ mod tests {
                 server_id: "a",
                 term: 1,
             },
-            vec![Action::SetTimeout],
+            vec![
+                Action::SetTimeout,
+                Action::SendMessage {
+                    server_id: "a",
+                    term: 1,
+                    message: Message::LogEntryInfo {
+                        version: None,
+                    },
+                },
+            ],
         );
 
         // b should now consider a the leader, let's check with a client
@@ -914,8 +1059,7 @@ mod tests {
                     term: 1,
                     server_id: "a",
                     message: Message::LogEntryInfo {
-                        entry_index: 0,
-                        entry_term: 1,
+                        version: Some((0, 1)),
                     },
                 },
                 Action::SetTimeout,
@@ -929,8 +1073,7 @@ mod tests {
                 term: 1,
                 server_id: "b",
                 message: Message::LogEntryInfo {
-                    entry_index: 0,
-                    entry_term: 1,
+                    version: Some((0, 1)),
                 },
             },
             vec![],

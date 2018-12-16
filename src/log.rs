@@ -19,6 +19,7 @@ pub fn compare_log_versions(a: LogVersion, b: LogVersion) -> Ordering {
     }
 }
 
+#[derive(Debug)]
 pub enum InsertError {
     NoSuchEntry,
     WrongTerm { index: LogIndex, actual_term: Term },
@@ -26,6 +27,7 @@ pub enum InsertError {
 
 pub type InsertResult = Result<(), InsertError>;
 
+#[derive(Debug)]
 pub enum GetResult<Snapshot, Entry> {
     Entries(Vec<(Term, Entry)>),
     Snapshot {
@@ -93,7 +95,7 @@ pub trait Log {
     fn version(&self) -> LogVersion;
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct TestEntry {
     value: usize,
     term: Term,
@@ -129,7 +131,9 @@ impl Log for TestLog {
         let mut index = match prev {
             None => 0,
             Some((index, term)) => match self.entries.get(index as usize) {
-                None => return Err(InsertError::NoSuchEntry),
+                None => {
+                    return Err(InsertError::NoSuchEntry)
+                },
                 Some(entry) => {
                     if entry.term != term {
                         return Err(InsertError::WrongTerm {
@@ -146,6 +150,10 @@ impl Log for TestLog {
             if self.entries.len() > index as usize {
                 if self.entries[index as usize].term != entry.0 {
                     self.entries.truncate(index as usize);
+                    self.entries.push(TestEntry {
+                        term: entry.0,
+                        value: entry.1,
+                    });
                 }
             } else {
                 self.entries.push(TestEntry {
