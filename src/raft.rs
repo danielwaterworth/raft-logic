@@ -588,10 +588,10 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
         }
     }
 
-    pub fn process(
-        &mut self,
+    pub fn process<'a>(
+        &'a mut self,
         input: &Input<ServerID, L::Entry>,
-    ) -> Operation<ServerID, L::Entry> {
+    ) -> Operation<'a, ServerID, L::Entry> {
         return match input {
             Input::ClientRequest { entry } => {
                 self.handle_client_request(entry.clone())
