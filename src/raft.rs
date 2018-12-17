@@ -164,8 +164,7 @@ fn rejected_vote<'a, ServerID, Entry>(
 }
 
 fn accepted_client_request<'a, ServerID, Entry>(
-    follower_infos: &mut HashMap<ServerID, LogStatus>,
-    next_index: LogIndex,
+    server_ids: Vec<ServerID>,
     current_term: Term,
     entry: Entry,
 ) -> Operation<'a, ServerID, Entry>
@@ -174,19 +173,16 @@ where
     Entry: Clone,
 {
     let mut actions: VecDeque<Action<ServerID, Entry>> = VecDeque::new();
-    for (server_id, follower_info) in follower_infos.iter_mut() {
-        if let LogStatus::UpToDate = follower_info {
-            *follower_info = LogStatus::Good { next: next_index };
-            actions.push_back(Action::SendMessage {
-                term: current_term,
-                server_id: server_id.clone(),
-                message: Message::ApplyEntriesRequest {
-                    commit: None,
-                    log_version: None,
-                    entries: vec![(current_term, entry.clone())],
-                },
-            });
-        }
+    for server_id in server_ids.into_iter() {
+        actions.push_back(Action::SendMessage {
+            term: current_term,
+            server_id: server_id.clone(),
+            message: Message::ApplyEntriesRequest {
+                commit: None,
+                log_version: None,
+                entries: vec![(current_term, entry.clone())],
+            },
+        });
     }
 
     Operation::FreeForm(actions)
@@ -336,9 +332,16 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
             State::Leader { follower_infos } => {
                 let index = self.log.append(self.current_term, entry.clone());
 
+                let mut server_ids = Vec::new();
+                for (server_id, follower_info) in follower_infos.iter_mut() {
+                    if let LogStatus::UpToDate = follower_info {
+                        *follower_info = LogStatus::Good { next: index };
+                        server_ids.push(server_id.clone());
+                    }
+                }
+
                 accepted_client_request(
-                    follower_infos,
-                    index,
+                    server_ids,
                     self.current_term,
                     entry.clone(),
                 )
