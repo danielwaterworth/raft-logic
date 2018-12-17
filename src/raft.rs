@@ -167,6 +167,8 @@ fn accepted_client_request<'a, ServerID, Entry>(
     server_ids: Vec<ServerID>,
     current_term: Term,
     entry: Entry,
+    committed_version: LogVersion,
+    prev_log_version: LogVersion,
 ) -> Operation<'a, ServerID, Entry>
 where
     ServerID: Eq + Hash + Clone,
@@ -178,8 +180,8 @@ where
             term: current_term,
             server_id: server_id.clone(),
             message: Message::ApplyEntriesRequest {
-                commit: None,
-                log_version: None,
+                commit: committed_version,
+                log_version: prev_log_version,
                 entries: vec![(current_term, entry.clone())],
             },
         });
@@ -276,6 +278,7 @@ fn send_entries<'a, ServerID, Entry>(
     server_id: ServerID,
     log_version: LogVersion,
     entries: Vec<(Term, Entry)>,
+    committed_version: LogVersion,
 ) -> Operation<'a, ServerID, Entry>
 where
     ServerID: Hash + Eq + Clone,
@@ -284,11 +287,50 @@ where
         term,
         server_id,
         message: Message::ApplyEntriesRequest {
-            commit: None, // FIXME
+            commit: committed_version,
             log_version,
             entries,
         },
     }))
+}
+
+fn update_commit_index<L, ServerID>(
+    current_term: Term,
+    log: &mut L,
+    follower_infos: &HashMap<ServerID, LogStatus>,
+) where
+    L: Log,
+    ServerID: Hash + Eq,
+{
+    let mut statuses: Vec<LogStatus> =
+        follower_infos.values().map(|value| value.clone()).collect();
+    statuses.push(LogStatus::UpToDate);
+    statuses.sort();
+    let index = (statuses.len() - 1) / 2;
+    let median_status = statuses[index].clone();
+
+    let median_next_log_index =
+        match median_status {
+            LogStatus::UpToDate => {
+                log.next_index()
+            },
+            LogStatus::Good { next } => {
+                next
+            },
+            _ => {
+                0
+            },
+        };
+
+    if median_next_log_index != 0 {
+        let potentially_committed_term =
+            log.term_of(median_next_log_index - 1).expect(
+                "Followers can't have more good entries than the leader"
+            );
+        if potentially_committed_term == current_term {
+            log.commit_index(median_next_log_index - 1);
+        }
+    }
 }
 
 impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
@@ -330,6 +372,7 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
             }
             State::Candidate { .. } => rejected_client_request(None),
             State::Leader { follower_infos } => {
+                let prev_log_version = self.log.version();
                 let index = self.log.append(self.current_term, entry.clone());
 
                 let mut server_ids = Vec::new();
@@ -344,6 +387,8 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
                     server_ids,
                     self.current_term,
                     entry.clone(),
+                    self.log.committed_version(),
+                    prev_log_version,
                 )
             }
         }
@@ -397,6 +442,7 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
                 *follower_state = FollowerState::Following(server_id.clone());
 
                 let result = self.log.insert(log_version, &entries);
+                self.log.commit_version(commit);
                 match result {
                     Ok(()) | Err(InsertError::NoSuchEntry) => entries_applied(
                         term,
@@ -478,6 +524,7 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
     fn send_from_zero(
         &mut self,
         server_id: ServerID,
+        committed_version: LogVersion,
     ) -> Operation<ServerID, L::Entry> {
         match self.log.get(0) {
             GetResult::Entries(entries) => send_entries(
@@ -485,6 +532,7 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
                 server_id.clone(),
                 None,
                 entries,
+                committed_version,
             ),
             GetResult::Snapshot { .. } => unimplemented!(),
             GetResult::Fail => unreachable!(),
@@ -505,9 +553,9 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
                 "Cannot transition from leader to candidate in the same term"
             ),
             State::Leader { follower_infos } => {
-                let follower_info = follower_infos
-                    .entry(server_id.clone())
-                    .or_insert(LogStatus::Unknown);
+                let follower_info = follower_infos.get_mut(&server_id).expect(
+                    "Every server should have an entry in follower_infos",
+                );
 
                 match version {
                     None => {
@@ -515,7 +563,10 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
                         if x > *follower_info {
                             *follower_info = x;
 
-                            self.send_from_zero(server_id.clone())
+                            self.send_from_zero(
+                                server_id.clone(),
+                                self.log.committed_version(),
+                            )
                         } else {
                             do_nothing()
                         }
@@ -523,30 +574,42 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
                     Some((entry_index, entry_term)) => {
                         let x = self.log.check(entry_index, entry_term);
                         if x > *follower_info {
-                            *follower_info = x;
-                            match follower_info {
+                            *follower_info = x.clone();
+                            update_commit_index(
+                                self.current_term,
+                                &mut self.log,
+                                follower_infos,
+                            );
+
+                            match x {
                                 LogStatus::Unknown => unreachable!(),
                                 LogStatus::Bad(index) => {
-                                    assert_eq!(*index, entry_index);
+                                    assert_eq!(index, entry_index);
 
-                                    if *index == 0 {
-                                        *follower_info =
-                                            LogStatus::Good { next: 0 };
-                                        self.send_from_zero(server_id.clone())
+                                    if index == 0 {
+                                        follower_infos.insert(
+                                            server_id.clone(),
+                                            LogStatus::Good { next: 0 },
+                                        );
+                                        self.send_from_zero(
+                                            server_id.clone(),
+                                            self.log.committed_version(),
+                                        )
                                     } else {
-                                        let index = *index - 1;
+                                        let index = index - 1;
                                         send_entries(
                                             self.current_term,
                                             server_id.clone(),
                                             Some((index, 0)),
                                             vec![],
+                                            self.log.committed_version(),
                                         )
                                     }
                                 }
                                 LogStatus::Good { next } => {
-                                    assert_eq!(*next, entry_index + 1);
+                                    assert_eq!(next, entry_index + 1);
 
-                                    match self.log.get(*next) {
+                                    match self.log.get(next) {
                                         GetResult::Entries(entries) => {
                                             send_entries(
                                                 self.current_term,
@@ -556,6 +619,7 @@ impl<ServerID: Hash + Eq + Clone, L: Log> Node<ServerID, L> {
                                                     entry_term,
                                                 )),
                                                 entries,
+                                                self.log.committed_version(),
                                             )
                                         }
                                         GetResult::Snapshot { .. } => {
@@ -1068,6 +1132,26 @@ mod tests {
                 },
             },
             vec![],
+        );
+
+        // We can check to see if the entry was committed by processing another
+        // client request
+        expect_actions(
+            &mut a,
+            &Input::ClientRequest { entry: 4 },
+            vec![
+                // Only b is up to date, so only b should receive a new
+                // message
+                Action::SendMessage {
+                    term: 1,
+                    server_id: "b",
+                    message: Message::ApplyEntriesRequest {
+                        commit: Some((0, 1)),
+                        log_version: Some((0, 1)),
+                        entries: vec![(1, 4)],
+                    },
+                },
+            ],
         );
     }
 }

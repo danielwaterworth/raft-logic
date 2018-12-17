@@ -78,7 +78,7 @@ pub trait Log {
     fn empty() -> Self;
 
     // Used by followers
-    fn commit(&mut self, index: LogIndex);
+    fn commit_version(&mut self, committed_version: LogVersion);
     fn insert(
         &mut self,
         prev: LogVersion,
@@ -86,10 +86,13 @@ pub trait Log {
     ) -> InsertResult;
 
     // Used by leader
+    fn commit_index(&mut self, index: LogIndex);
     fn append(&mut self, term: Term, entry: Self::Entry) -> LogIndex;
     fn get(&self, index: LogIndex) -> GetResult<Self::Snapshot, Self::Entry>;
     fn check(&self, index: LogIndex, term: Term) -> LogStatus;
     fn term_of(&self, index: LogIndex) -> Option<Term>;
+    fn next_index(&self) -> LogIndex;
+    fn committed_version(&self) -> LogVersion;
 
     // Used during elections
     fn version(&self) -> LogVersion;
@@ -118,9 +121,19 @@ impl Log for TestLog {
         }
     }
 
-    fn commit(&mut self, index: LogIndex) {
+    fn commit_index(&mut self, index: LogIndex) {
         self.next_commit_index =
             max(self.next_commit_index, (index + 1) as usize);
+    }
+
+    fn commit_version(&mut self, committed_version: LogVersion) {
+        if let Some((index, term)) = committed_version {
+            if let Some(entry) = self.entries.get(index as usize) {
+                if entry.term == term {
+                    self.commit_index(index);
+                }
+            }
+        }
     }
 
     fn insert(
@@ -209,6 +222,23 @@ impl Log for TestLog {
                     LogStatus::Bad(index)
                 }
             }
+        }
+    }
+
+    fn next_index(&self) -> LogIndex {
+        self.entries.len() as LogIndex
+    }
+
+    fn committed_version(&self) -> LogVersion {
+        if self.next_commit_index == 0 {
+            None
+        } else {
+            let committed_index = self.next_commit_index - 1;
+            let committed_term =
+                self.entries.get(committed_index).expect(
+                    "Committed an entry that isn't in the log"
+                ).term;
+            Some((committed_index as LogIndex, committed_term))
         }
     }
 }
