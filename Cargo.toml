@@ -1,5 +1,5 @@
 [package]
-name = "raft"
+name = "raft-logic"
 version = "0.1.0"
 authors = ["Daniel Waterworth <me@danielwaterworth.com>"]
 edition = "2018"

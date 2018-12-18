@@ -1,4 +1,4 @@
-use raft::world::{World, WorldUpdate};
+use raft_logic::world::{World, WorldUpdate};
 use std::panic;
 
 fn simulate(
